@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+
+# Output & generated files
+output/
+output-instance/
+runs/
+src/output/
+
+# NumPy / data files
+*.npy
+*.npz
+
+# Calibration images (besar, simpan di LFS bila perlu)
+src/calib_imgs/*.jpg
+src/calib_imgs/*.jpeg
+src/calib_imgs/*.png
+src/calib_imgs/*.bmp
+
+# Test images
+test/
+
+# Misc
+*.log
+.DS_Store
+Thumbs.db
+undistort_preview.jpg
