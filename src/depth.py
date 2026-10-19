@@ -29,6 +29,9 @@ CATATAN:
     dengan variasi jarak ke kamera, makin stabil estimasi skala.
   * Depth di tepi citra bisa tidak akurat pada model monocular — hindari
     mengandalkan piksel < 5% dari tepi untuk perhitungan volume.
+  * lift_to_ground menggunakan konvensi dunia yang sama dengan ipm.py:
+    bidang tanah Z_world = 0, Z_world positif ke atas. Output X, Y
+    langsung aligned ke world frame — konsisten dengan ground_ref.json.
 """
 import argparse
 import json
@@ -152,51 +155,45 @@ def apply_scale(depth_raw, s, b, clip_min=0.1, clip_max=50.0):
 
 
 # ================================================================ lift ke tanah
-def _gravity_vector(R):
-    """Vektor arah gravitasi di koordinat kamera (dunia: Z ke atas = -gravity)."""
-    down_world = np.array([0.0, 0.0, -1.0])
-    g = R @ down_world
-    norm = np.linalg.norm(g)
-    if norm < 1e-9:
-        raise RuntimeError("Vektor gravitasi degenerasi — periksa matriks R.")
-    return g / norm
-
-
 def lift_to_ground(K, R, t, depth_m, waste_mask):
     """Proyeksikan piksel sampah ke koordinat bidang tanah menggunakan depth.
 
+    Konvensi koordinat dunia (sama dengan ipm.py / solvePnP):
+      - Bidang tanah ada di Z_world = 0
+      - Z_world positif = ke atas
+      - X_world, Y_world sesuai titik acuan yang dipakai pada solvePnP
+
+    Alur:
+      1. Rekonstruksi titik 3D di koordinat kamera dari depth + piksel.
+      2. Transform balik ke koordinat dunia: P_world = R^T @ P_cam + cam_pos
+      3. Height = Z_world (sudah dalam meter, langsung tanpa perlu h_cam).
+      4. X, Y = komponen X_world dan Y_world (aligned ke world frame).
+
     Mengembalikan
     -------------
-    X, Y   : ndarray (N,) — posisi horizontal di bidang tanah (meter)
-    height : ndarray (N,) — tinggi tiap piksel di atas bidang tanah (meter, >= 0)
-    uv     : ndarray (N, 2) — koordinat piksel yang diproses
+    X, Y   : ndarray (N,) — posisi di bidang tanah, aligned ke world frame (meter)
+    height : ndarray (N,) — tinggi tiap piksel di atas tanah (Z_world, meter, >= 0)
+    uv     : ndarray (N, 2) — koordinat piksel yang diproses [u, v]
     """
-    cam_pos = (-R.T @ t.ravel())                 # posisi kamera di koordinat dunia
-    h_cam = float(abs(cam_pos[2]))               # tinggi kamera di atas tanah
-
-    g = _gravity_vector(R)                       # arah "bawah" di kamera
-
-    # Bangun basis bidang tanah ortogonal terhadap g
-    ref = np.array([1.0, 0.0, 0.0])
-    if abs(np.dot(g, ref)) > 0.9:               # degenerasi: g hampir sejajar sumbu X
-        ref = np.array([0.0, 1.0, 0.0])
-    a = np.cross(g, ref)
-    a /= np.linalg.norm(a)
-    b_ax = np.cross(g, a)                        # b_ax ⊥ g ⊥ a
-
     v_idx, u_idx = np.nonzero(waste_mask)
-    z = depth_m[v_idx, u_idx]                   # depth sepanjang sumbu optik
+    z = depth_m[v_idx, u_idx]                   # depth sepanjang sumbu optik kamera
 
     # Rekonstruksi titik 3D di koordinat kamera
-    P = np.stack([
+    P_cam = np.stack([
         (u_idx - K[0, 2]) / K[0, 0] * z,
         (v_idx - K[1, 2]) / K[1, 1] * z,
         z
     ], axis=1)                                   # (N, 3)
 
-    height = np.clip(h_cam - P @ g, 0.0, None)  # tinggi di atas tanah
-    X = P @ a                                    # koordinat horizontal-1
-    Y = P @ b_ax                                 # koordinat horizontal-2
+    # Transform ke koordinat dunia: P_world = R^T @ P_cam + cam_pos
+    # R^T = R^{-1} karena R adalah matriks rotasi ortonormal
+    cam_pos = -R.T @ t.ravel()                   # posisi kamera di koordinat dunia
+    P_world = (R.T @ P_cam.T).T + cam_pos        # (N, 3)
+
+    # Bidang tanah Z_world = 0 → tinggi = Z_world titik tersebut
+    height = np.clip(P_world[:, 2], 0.0, None)   # (N,)
+    X = P_world[:, 0]                            # koordinat X dunia
+    Y = P_world[:, 1]                            # koordinat Y dunia
 
     return X, Y, height, np.stack([u_idx, v_idx], axis=1)
 
