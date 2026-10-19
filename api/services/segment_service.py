@@ -118,9 +118,7 @@ async def run_segmentation(
     # Load segmentation model
     seg_model_path = Path(settings.MODELS_DIR) / (job.seg_model or settings.DEFAULT_SEG_MODEL)
     if not seg_model_path.exists():
-        seg_model_path = Path("src") / (job.seg_model or settings.DEFAULT_SEG_MODEL)
-    if not seg_model_path.exists():
-        raise FileNotFoundError(f"Segmentation model not found: {job.seg_model or settings.DEFAULT_SEG_MODEL}")
+        raise FileNotFoundError(f"Segmentation model not found: {job.seg_model or settings.DEFAULT_SEG_MODEL} (looked in {settings.MODELS_DIR})")
     
     waste_classes = job.seg_classes or ["Sampah_Berserakan", "Sampah_Overload"]
     

@@ -2,7 +2,7 @@
 import io
 import json
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 from uuid import uuid4
 
 import cv2
@@ -14,7 +14,7 @@ from sqlalchemy.orm import selectinload
 from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import (
-    Camera, Calibration, GroundModel, DepthScale, 
+    Camera, Calibration, GroundModel, GroundReference, DepthScale,
     PredictionJob, PredictionOutput, DetectedInstance, VolumeEstimate
 )
 from api.services.calibration_service import undistort_image

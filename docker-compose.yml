@@ -39,7 +39,6 @@ services:
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./api:/app/api
-      - ./src:/app/src
       - ./models:/models
       - ./data:/data
     ports:
@@ -55,6 +54,7 @@ services:
       - MODELS_DIR=/models
       - STORAGE_LOCAL_ROOT=/data/waste-api
       - DEBUG=true
+      - PYTHONPATH=/app
     env_file:
       - .env
 
@@ -66,7 +66,6 @@ services:
     command: celery -A api.workers.celery_app worker --loglevel=info --concurrency=2
     volumes:
       - ./api:/app/api
-      - ./src:/app/src
       - ./models:/models
       - ./data:/data
     depends_on:
@@ -79,6 +78,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - MODELS_DIR=/models
       - STORAGE_LOCAL_ROOT=/data/waste-api
+      - PYTHONPATH=/app
     env_file:
       - .env
 
@@ -92,6 +92,7 @@ services:
       - redis
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
+      - PYTHONPATH=/app
 
 volumes:
   pgdata:

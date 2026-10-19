@@ -1,8 +1,8 @@
 """Application configuration using Pydantic Settings."""
+import json
 from pathlib import Path
 from typing import List, Optional
-from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     
     # Security
     API_KEY_HEADER: str = "X-API-Key"
-    VALID_API_KEYS: List[str] = Field(default_factory=list)
+    VALID_API_KEYS: str = ""
     SECRET_KEY: str = "change-me-in-production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 1 week
     
@@ -72,10 +72,27 @@ class Settings(BaseSettings):
     DEFAULT_PAGE_SIZE: int = 20
     MAX_PAGE_SIZE: int = 100
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        enable_decoding=False,
+    )
+
+    @property
+    def valid_api_keys(self) -> List[str]:
+        """Return configured API keys from comma-separated or JSON-list input."""
+        value = self.VALID_API_KEYS.strip()
+        if not value:
+            return []
+        if value.startswith("["):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(key).strip() for key in parsed if str(key).strip()]
+        return [key.strip() for key in value.split(",") if key.strip()]
 
 
 settings = Settings()

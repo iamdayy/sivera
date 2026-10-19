@@ -22,7 +22,7 @@ async def verify_api_key(
         )
     
     # Check against configured keys (for simple deployments)
-    if api_key in settings.VALID_API_KEYS:
+    if api_key in settings.valid_api_keys:
         # Return a dummy ApiKey object for configured keys
         return ApiKey(
             id="configured",

@@ -232,10 +232,7 @@ async def run_depth_pipeline(
     # 1. Predict depth
     depth_model_path = Path(settings.MODELS_DIR) / depth_scale.depth_model
     if not depth_model_path.exists():
-        # Try src folder
-        depth_model_path = Path("src") / depth_scale.depth_model
-    if not depth_model_path.exists():
-        raise FileNotFoundError(f"Depth model not found: {depth_scale.depth_model}")
+        raise FileNotFoundError(f"Depth model not found: {depth_scale.depth_model} (looked in {settings.MODELS_DIR})")
     
     depth_raw = predict_depth(
         image, str(depth_model_path),
