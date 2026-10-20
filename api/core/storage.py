@@ -180,3 +180,36 @@ def generate_storage_key(
     filename = f"{uuid4().hex}.{extension}"
     parts.append(filename)
     return "/".join(parts)
+
+
+def validate_image_content(
+    content: bytes, filename: str = "", max_size_mb: int = 10
+) -> None:
+    """Validate uploaded image content bytes.
+    
+    Checks that content is non-empty, within size limit, and has valid
+    image magic bytes (JPEG, PNG, BMP, GIF). Raises ValueError on failure.
+    """
+    if not content:
+        raise ValueError("Empty file uploaded.")
+    
+    if len(content) > max_size_mb * 1024 * 1024:
+        raise ValueError(
+            f"File '{filename}' too large: {len(content)} bytes. "
+            f"Maximum {max_size_mb}MB."
+        )
+    
+    # Magic byte signatures
+    if content[:2] == b"\xff\xd8":
+        return  # JPEG
+    if len(content) >= 8 and content[:8] == b"\x89PNG\r\n\x1a\n":
+        return  # PNG
+    if content[:2] == b"BM":
+        return  # BMP
+    if content[:4] in (b"GIF87a", b"GIF89a"):
+        return  # GIF
+    
+    raise ValueError(
+        f"Invalid image file '{filename}': unrecognized magic bytes "
+        f"{content[:4]!r}"
+    )

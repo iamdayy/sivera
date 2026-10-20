@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 from api.core.config import settings
 from api.core.database import get_db
 from api.core.security import verify_api_key, require_scope
-from api.core.storage import get_storage
+from api.core.storage import get_storage, validate_image_content
 from api.models.orm import (
     Camera, Calibration, GroundModel, DepthScale, 
     PredictionJob, PredictionOutput, DetectedInstance, VolumeEstimate
@@ -97,10 +97,23 @@ async def submit_prediction(
         if not file:
             raise HTTPException(status_code=400, detail="File required for upload source type")
         
+        # Pre-read size check (from Content-Length header)
+        if file.size is not None and file.size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large. Maximum {settings.MAX_UPLOAD_SIZE_MB}MB.",
+            )
+        
         # Save uploaded file
         storage = get_storage()
         import io
         content = await file.read()
+        # Validate content (size + magic bytes)
+        try:
+            validate_image_content(content, file.filename or "upload",
+                                   settings.MAX_UPLOAD_SIZE_MB)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         key = f"cameras/{camera_id}/uploads/{UUID(int=0).hex}_{file.filename}"
         buf = io.BytesIO(content)
         storage.save(key, buf, file.content_type or "image/jpeg")

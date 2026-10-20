@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     VALID_API_KEYS: str = ""
     SECRET_KEY: str = "change-me-in-production"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 1 week
+    CORS_ORIGINS: str = ""  # comma-separated origins; empty = secure default (see main.py)
     
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://waste:waste@localhost:5432/waste_db"
@@ -34,6 +35,9 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
     CELERY_TASK_TRACK_STARTED: bool = True
     CELERY_TASK_TIME_LIMIT: int = 300  # 5 minutes
+    
+    # Upload limits
+    MAX_UPLOAD_SIZE_MB: int = 10  # maximum upload size in megabytes
     
     # File Storage
     STORAGE_BACKEND: str = "local"  # "local" | "s3"
@@ -97,13 +101,6 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Convenience paths
+# Convenience paths (directories are created at application startup, not import time)
 MODELS_DIR = Path(settings.MODELS_DIR)
 STORAGE_ROOT = Path(settings.STORAGE_LOCAL_ROOT)
-# Only create directory if it exists or we have permissions
-try:
-    STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
-except PermissionError:
-    # Fallback to local directory
-    STORAGE_ROOT = Path("./data/waste-api")
-    STORAGE_ROOT.mkdir(parents=True, exist_ok=True)

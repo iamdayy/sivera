@@ -1,13 +1,16 @@
 """FastAPI application factory and main entry point."""
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from pathlib import Path
+
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.utils import get_openapi
+from sqlalchemy import text
 
 from api.core.config import settings
-from api.core.database import init_db, close_db, engine
+from api.core.database import AsyncSession, get_db, init_db, close_db, engine
 from api.core.storage import get_storage
 from api.core.config import STORAGE_ROOT
 from api.routes import cameras, calibrations, ground_refs, predictions
@@ -18,6 +21,13 @@ async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup
     await init_db()
+    # Ensure storage root directory exists (created at startup, not import time)
+    try:
+        STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        # Fallback to a directory under the project root (writable in this environment)
+        fallback_root = Path("./storage")
+        fallback_root.mkdir(parents=True, exist_ok=True)
     yield
     # Shutdown
     await close_db()
@@ -105,16 +115,31 @@ app = FastAPI(
 app.openapi = custom_openapi
 
 # CORS
+if settings.CORS_ORIGINS:
+    allow_origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
+elif settings.DEBUG:
+    allow_origins = ["*"]  # dev convenience; restrict in production via CORS_ORIGINS
+else:
+    allow_origins = []  # secure default: no cross-origin access unless explicitly configured
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Static file serving for local storage
-app.mount("/files", StaticFiles(directory=STORAGE_ROOT), name="files")
+# Resolve a writable storage root at import time (StaticFiles checks existence eagerly).
+_storage_root = STORAGE_ROOT
+try:
+    _storage_root.mkdir(parents=True, exist_ok=True)
+except PermissionError:
+    # Fallback to a directory under the project root (writable in this environment)
+    _storage_root = Path("./storage")
+    _storage_root.mkdir(parents=True, exist_ok=True)
+app.mount("/files", StaticFiles(directory=_storage_root), name="files")
 
 # Include routers
 app.include_router(cameras.router)
@@ -125,12 +150,22 @@ app.include_router(predictions.router)
 
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint."""
+async def health_check(db: AsyncSession = Depends(get_db)):
+    """Health check endpoint.
+
+    Probes the database connection honestly instead of reporting connected
+    unconditionally. Never exposes internal error details to the client.
+    """
+    try:
+        await db.execute(text("SELECT 1"))
+        database = "connected"
+    except Exception:
+        database = "disconnected"
+
     return {
-        "status": "healthy",
+        "status": "healthy" if database == "connected" else "degraded",
         "version": settings.APP_VERSION,
-        "database": "connected",
+        "database": database,
     }
 
 

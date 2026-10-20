@@ -15,7 +15,7 @@ from api.schemas.calibration import (
     CalibrationActivateResponse, UndistortPreviewResponse
 )
 from api.services.calibration_service import process_calibration_upload, undistort_image, scale_K_for_resolution
-from api.core.storage import get_storage
+from api.core.storage import get_storage, validate_image_content
 
 
 router = APIRouter(prefix="/cameras/{camera_id}/calibrations", tags=["calibrations"])
@@ -48,7 +48,19 @@ async def create_calibration(
     # Read uploaded files
     image_files = []
     for f in files:
+        # Pre-read size check (from Content-Length header)
+        if f.size is not None and f.size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File '{f.filename}' too large. Maximum {settings.MAX_UPLOAD_SIZE_MB}MB.",
+            )
         content = await f.read()
+        # Validate content (size + magic bytes)
+        try:
+            validate_image_content(content, f.filename or "image",
+                                   settings.MAX_UPLOAD_SIZE_MB)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         if content:
             image_files.append((f.filename, content))
     

@@ -8,7 +8,6 @@ celery_app = Celery(
     backend=settings.CELERY_RESULT_BACKEND,
     include=[
         "api.workers.tasks.predict_task",
-        "api.workers.tasks.calibrate_task",
     ],
 )
 

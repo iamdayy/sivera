@@ -38,8 +38,13 @@ src/calib_imgs/*.bmp
 # Test images
 test/
 
+# Agent audit/report artifacts
+.agents/
+
 # Misc
 *.log
 .DS_Store
 Thumbs.db
 undistort_preview.jpg
+
+.env

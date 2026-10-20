@@ -230,6 +230,7 @@ class DepthScale(Base):
     max_residual_m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     clip_min_m: Mapped[float] = mapped_column(Float, default=0.1, nullable=False)
     clip_max_m: Mapped[float] = mapped_column(Float, default=50.0, nullable=False)
+    is_active: Mapped[bool] = mapped_column(default=True, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships
