@@ -87,7 +87,9 @@ services:
       - .env
 
   flower:
-    image: mher/flower:2.0
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: waste-flower
     command: celery -A api.workers.celery_app flower --port=5555 --basic_auth=user:pass
     ports:
@@ -97,6 +99,7 @@ services:
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - PYTHONPATH=/app
+    working_dir: /app
     volumes:
       - ./api:/app/api
 
