@@ -48,9 +48,21 @@ class LocalStorage(StorageBackend):
         self.root.mkdir(parents=True, exist_ok=True)
     
     def _resolve(self, key: str) -> Path:
-        # Prevent path traversal
-        safe_key = key.lstrip("/").replace("..", "")
-        return self.root / safe_key
+        """Resolve a storage key to a filesystem path, preventing traversal."""
+        # Reject absolute keys and any component that escapes the root
+        root = self.root.resolve()
+        # Normalise the key: strip leading slashes, reject backslashes
+        safe_key = key.lstrip("/").replace("\\", "/")
+        # Reject any ".." segment after normalisation
+        if ".." in Path(safe_key).parts:
+            raise ValueError(f"Unsafe storage key: {key!r}")
+        candidate = (root / safe_key).resolve()
+        # Ensure the resolved path stays within the storage root
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            raise ValueError(f"Unsafe storage key: {key!r}")
+        return candidate
     
     def save(self, key: str, data: BinaryIO, content_type: str = "application/octet-stream") -> str:
         path = self._resolve(key)

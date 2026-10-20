@@ -13,6 +13,9 @@ from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import Camera, Calibration, GroundModel, DepthScale
 
+# Lazy model cache: loads each YOLO depth model once per process
+_depth_model_cache: dict = {}
+
 
 def predict_depth(
     image_bgr: np.ndarray,
@@ -23,7 +26,11 @@ def predict_depth(
     """Predict depth map from image using YOLO depth model."""
     from ultralytics import YOLO
     
-    model = YOLO(model_path)
+    # Lazy-load and cache the model per process
+    if model_path not in _depth_model_cache:
+        _depth_model_cache[model_path] = YOLO(model_path)
+    model = _depth_model_cache[model_path]
+    
     results = model.predict(source=image_bgr, imgsz=imgsz, device=device, verbose=False)
     res = results[0]
     

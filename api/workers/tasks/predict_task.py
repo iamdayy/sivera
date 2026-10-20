@@ -1,6 +1,7 @@
 """Celery tasks for async prediction processing."""
 import io
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -38,7 +39,7 @@ def run_prediction_task(self, job_id: str):
                 raise ValueError(f"Job {job_id} not found")
             
             job.status = "processing"
-            job.started_at = settings.datetime.utcnow() if hasattr(settings, 'datetime') else __import__('datetime').datetime.utcnow()
+            job.started_at = datetime.now(timezone.utc)
             await db.flush()
             
             try:
@@ -160,15 +161,15 @@ def run_prediction_task(self, job_id: str):
                 
                 job.status = "done"
                 job.result = summary
-                job.completed_at = __import__('datetime').datetime.utcnow()
+                job.completed_at = datetime.now(timezone.utc)
                 
                 await db.commit()
                 return summary
-                
+            
             except Exception as e:
                 job.status = "failed"
                 job.error_msg = str(e)
-                job.completed_at = __import__('datetime').datetime.utcnow()
+                job.completed_at = datetime.now(timezone.utc)
                 await db.commit()
                 raise
     

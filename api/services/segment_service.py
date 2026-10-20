@@ -18,6 +18,9 @@ COLORS = {
     "sampah_overload": (0, 0, 255),
 }
 
+# Lazy model cache: loads each YOLO model once per process
+_seg_model_cache: dict = {}
+
 
 def norm(s: str) -> str:
     return s.strip().lower().replace(" ", "_")
@@ -53,7 +56,11 @@ def predict_instances(
     """Predict instances using YOLO segmentation model."""
     from ultralytics import YOLO
     
-    model = YOLO(model_path)
+    # Lazy-load and cache the model per process
+    if model_path not in _seg_model_cache:
+        _seg_model_cache[model_path] = YOLO(model_path)
+    model = _seg_model_cache[model_path]
+    
     r = model.predict(source=image_bgr, device=device, imgsz=imgsz, conf=conf, iou=iou, verbose=False)[0]
     
     out = []

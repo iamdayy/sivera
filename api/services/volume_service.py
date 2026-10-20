@@ -165,23 +165,25 @@ async def save_volume_results(
     # Convex hull method
     vol_hull, foot_hull = estimate_volume_convexhull(X, Y, H)
     
-    # Save volume estimates
-    db.add(VolumeEstimate(
-        job_id=job.id, method="grid",
-        volume_m3=vol_grid, volume_liter=vol_grid * 1000,
-        footprint_m2=foot_grid, cell_m=cell_m,
-        height_mean_m=float(H.mean()) if len(H) else 0,
-        height_median_m=float(np.median(H)) if len(H) else 0,
-        n_cells=int(np.isfinite(grid_h).sum()), n_points=len(H),
-    ))
-    db.add(VolumeEstimate(
-        job_id=job.id, method="convex_hull",
-        volume_m3=vol_hull, volume_liter=vol_hull * 1000,
-        footprint_m2=foot_hull, cell_m=None,
-        height_mean_m=float(H.mean()) if len(H) else 0,
-        height_median_m=float(np.median(H)) if len(H) else 0,
-        n_cells=None, n_points=len(H),
-    ))
+    # Save volume estimates only when there is data.
+    # Missing/failed estimates must remain missing, not represented as zero.
+    if len(H) > 0:
+        db.add(VolumeEstimate(
+            job_id=job.id, method="grid",
+            volume_m3=vol_grid, volume_liter=vol_grid * 1000,
+            footprint_m2=foot_grid, cell_m=cell_m,
+            height_mean_m=float(H.mean()),
+            height_median_m=float(np.median(H)),
+            n_cells=int(np.isfinite(grid_h).sum()), n_points=len(H),
+        ))
+        db.add(VolumeEstimate(
+            job_id=job.id, method="convex_hull",
+            volume_m3=vol_hull, volume_liter=vol_hull * 1000,
+            footprint_m2=foot_hull, cell_m=None,
+            height_mean_m=float(H.mean()),
+            height_median_m=float(np.median(H)),
+            n_cells=None, n_points=len(H),
+        ))
     
     # Per-instance volumes
     inst_results = []
@@ -190,10 +192,10 @@ async def save_volume_results(
             instances, {"X": X, "Y": Y, "height": H, "uv": uv},
             img_shape, cell_m, min_pts_per_cell
         )
-        for ir in inst_results:
+        for ir, ins in zip(inst_results, instances):
             db.add(DetectedInstance(
                 job_id=job.id, cls_name=ir["cls"], confidence=ir["conf"],
-                polygon_px=[], polygon_world=[],
+                polygon_px=ins.get("polygon", []), polygon_world=[],
                 volume_m3=ir["volume_m3"], footprint_m2=ir["footprint_m2"],
                 height_mean_m=None, height_max_m=None, n_pixels=ir["n_pts"],
             ))

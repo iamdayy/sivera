@@ -1,12 +1,13 @@
 """Ground Reference and Ground Model API routes."""
 from typing import List, Optional
 from uuid import UUID
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import selectinload
 
-from api.core.config import settings
+from api.core.config import settings, STORAGE_ROOT
 from api.core.database import get_db
 from api.core.security import verify_api_key, require_scope
 from api.models.orm import Camera, Calibration, GroundReference, GroundModel
@@ -81,6 +82,7 @@ async def create_ground_reference(
         image_points=img_pts,
         world_points=world_pts,
         version=next_version,
+        world_units=world_units,
         description=description,
     )
     
@@ -203,6 +205,10 @@ async def activate_ground_reference(
     calibration = calib_result.scalar_one_or_none()
     
     if calibration:
+        # Remove old ground models for this ground reference to avoid accumulation
+        await db.execute(
+            delete(GroundModel).where(GroundModel.ground_ref_id == ground_ref.id)
+        )
         # Create new ground model
         await create_ground_model_from_ref(
             db=db,
@@ -306,7 +312,24 @@ async def get_bev_preview(
     calibration = calib_result.scalar_one_or_none()
     if not calibration:
         raise HTTPException(status_code=404, detail="Calibration not found")
-    
+
+    # Validate optional file paths: only allow paths under STORAGE_ROOT
+    def _validate_storage_path(p: Optional[str], label: str) -> Optional[str]:
+        if not p:
+            return None
+        try:
+            root = STORAGE_ROOT.resolve()
+            candidate = Path(p).resolve()
+            candidate.relative_to(root)
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label} must be a path under the storage root",
+            )
+        if not candidate.exists():
+            raise HTTPException(status_code=400, detail=f"{label} not found")
+        return str(candidate)
+
     # Use default test image if not provided
     if not test_image_path:
         # Try to find a calibration image
@@ -314,7 +337,11 @@ async def get_bev_preview(
             test_image_path = calibration.calib_images[0]
         else:
             raise HTTPException(status_code=400, detail="No test image available. Provide test_image_path.")
-    
+    else:
+        test_image_path = _validate_storage_path(test_image_path, "test_image_path")
+    if mask_path:
+        mask_path = _validate_storage_path(mask_path, "mask_path")
+
     try:
         preview = await generate_bev_preview(
             db=db,
@@ -326,4 +353,4 @@ async def get_bev_preview(
         )
         return BEVPreviewResponse(**preview)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"BEV preview generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="BEV preview generation failed. See server logs for details.")

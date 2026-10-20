@@ -17,6 +17,7 @@ from api.models.orm import (
 )
 from api.schemas.prediction import (
     PredictionJobCreate, PredictionJobResponse, PredictionJobSubmitResponse,
+    PredictionJobListResponse,
     PredictionOutputsResponse, PredictionOutputResponse,
     DetectedInstanceResponse, VolumeEstimateResponse
 )
@@ -184,7 +185,7 @@ async def get_prediction_job(
     return PredictionJobResponse.model_validate(job)
 
 
-@router.get("", response_model=List[PredictionJobResponse])
+@router.get("", response_model=PredictionJobListResponse)
 async def list_prediction_jobs(
     camera_id: UUID,
     status: Optional[str] = Query(None),
@@ -207,7 +208,14 @@ async def list_prediction_jobs(
     result = await db.execute(query)
     jobs = result.scalars().all()
     
-    return [PredictionJobResponse.model_validate(j) for j in jobs]
+    total_pages = (total + page_size - 1) // page_size
+    return PredictionJobListResponse(
+        items=[PredictionJobResponse.model_validate(j) for j in jobs],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
 
 
 @router.get("/{job_id}/outputs", response_model=PredictionOutputsResponse)

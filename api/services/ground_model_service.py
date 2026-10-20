@@ -217,6 +217,7 @@ async def save_ground_reference(
     image_points: List[List[float]],
     world_points: List[List[float]],
     version: int,
+    world_units: str = "meter",
     description: Optional[str] = None,
 ) -> GroundReference:
     """Save ground reference to database."""
@@ -233,7 +234,7 @@ async def save_ground_reference(
         version=version,
         image_points=image_points,
         world_points=world_points,
-        world_units="meter",
+        world_units=world_units,
         description=description,
         is_active=True,
     )

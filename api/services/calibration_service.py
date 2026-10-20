@@ -1,5 +1,6 @@
 """Calibration service: wraps existing calibrate.py logic for API use."""
 import json
+import logging
 import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -12,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import Calibration, Camera
+
+logger = logging.getLogger(__name__)
 
 
 def calibrate_from_images(
@@ -41,11 +44,11 @@ def calibrate_from_images(
         if size is None:
             size = gray.shape[::-1]  # (w, h)
         elif gray.shape[::-1] != size:
-            print(f"[skip] {p}: size {gray.shape[::-1]} != {size}")
+            logger.debug("[skip] %s: size %s != %s", p, gray.shape[::-1], size)
             continue
         found, corners = cv2.findChessboardCornersSB(gray, pattern, flags=flags)
         if not found:
-            print(f"[skip] {p}: chessboard not detected")
+            logger.debug("[skip] %s: chessboard not detected", p)
             continue
         obj_pts.append(objp)
         img_pts.append(corners)

@@ -46,6 +46,14 @@ class PredictionJobSubmitResponse(BaseModel):
     estimated_duration_sec: int = 30
 
 
+class PredictionJobListResponse(BaseModel):
+    items: List[PredictionJobResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+
+
 class PredictionOutputResponse(BaseModel):
     id: UUID
     job_id: UUID

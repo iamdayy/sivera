@@ -1,18 +1,18 @@
 """FastAPI application factory and main entry point."""
+import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Path as FastAPIPath
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
 from fastapi.openapi.utils import get_openapi
 from sqlalchemy import text
 
-from api.core.config import settings
+from api.core.config import settings, STORAGE_ROOT
 from api.core.database import AsyncSession, get_db, init_db, close_db, engine
+from api.core.security import verify_api_key
 from api.core.storage import get_storage
-from api.core.config import STORAGE_ROOT
 from api.routes import cameras, calibrations, ground_refs, predictions
 
 
@@ -130,16 +130,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static file serving for local storage
-# Resolve a writable storage root at import time (StaticFiles checks existence eagerly).
-_storage_root = STORAGE_ROOT
-try:
-    _storage_root.mkdir(parents=True, exist_ok=True)
-except PermissionError:
-    # Fallback to a directory under the project root (writable in this environment)
-    _storage_root = Path("./storage")
-    _storage_root.mkdir(parents=True, exist_ok=True)
-app.mount("/files", StaticFiles(directory=_storage_root), name="files")
+# Artefact file serving (authenticated)
+# Replaces the unauthenticated StaticFiles mount at /files.
+@app.get("/files/{path:path}")
+async def serve_artefact(
+    path: str = FastAPIPath(..., description="Storage key path (e.g. cameras/123/outputs/abc.jpg)"),
+    db: AsyncSession = Depends(get_db),
+    api_key=Depends(verify_api_key),
+):
+    """Serve a stored artefact file with API-key authentication."""
+    storage = get_storage()
+    if not storage.exists(path):
+        raise HTTPException(status_code=404, detail="Artefact not found")
+    file_stream = storage.get(path)
+    if not file_stream:
+        raise HTTPException(status_code=404, detail="Artefact not found in storage")
+    # Guess content type from extension
+    import mimetypes
+    content_type, _ = mimetypes.guess_type(path)
+    return StreamingResponse(
+        file_stream,
+        media_type=content_type or "application/octet-stream",
+    )
 
 # Include routers
 app.include_router(cameras.router)
