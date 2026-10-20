@@ -42,10 +42,10 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY api ./api
 
 # Create data directories
-RUN mkdir -p /data/waste-api /models
+RUN mkdir -p /app/storage /models
 
 # Create non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /data /models
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app /models
 USER appuser
 
 # Health check
