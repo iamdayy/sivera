@@ -46,25 +46,26 @@ SIVERA dirancang untuk mengatasi tantangan estimasi volume objek dan pemodelan r
 
 ## 🚀 Fitur Utama
 
-### 1. **Manajemen Kamera** (`/api/v1/cameras`)
+### 1. **Manajemen Kamera** (`/cameras`)
 - Registrasi kamera dengan metadata lokasi (PostGIS support)
 - Konfigurasi intrinsik/ekstrinsik kamera
 - CRUD lengkap untuk registry kamera
 
-### 2. **Kalibrasi Otomatis** (`/api/v1/cameras/{id}/calibrations`)
+### 2. **Kalibrasi Otomatis** (`/cameras/{id}/calibrations`)
 - Upload gambar papan catur → kalibrasi intrinsik (K, distorsi, RMS)
 - Versioning kalibrasi dengan aktivasi/deaktivasi
 - Preview undistort untuk validasi visual
 
-### 3. **Referensi Tanah & Ground Model** (`/api/v1/cameras/{id}/ground-refs`)
+### 3. **Referensi Tanah & Ground Model** (`/cameras/{id}/ground-refs`)
 - Submit titik referensi tanah (image ↔ world coordinates)
 - Komputasi homography matrix + pose kamera (R, t, H)
 - BEV (Bird's Eye View) preview untuk verifikasi
 
-### 4. **Prediksi Asinkron** (`/api/v1/cameras/{id}/predict`)
-- Submit job prediksi via Celery worker
-- Polling status job real-time
+### 4. **Prediksi Asinkron** (`/cameras/{id}/predict`)
+- Submit job prediksi, antrekan melalui Celery worker (mengembalikan HTTP 202 Accepted)
+- Polling status job melalui `GET /cameras/{id}/predict/{job_id}`
 - Output: gambar teranotasi, NPZ (data numerik), JSON report
+- **Catatan:** Sumber `rtsp_frame` dan `latest_rtsp` dikenali dalam schema tetapi handler saat ini melempar `NotImplementedError` (belum diimplementasikan). Hanya `upload` yang diproses.
 
 ### 5. **Pipeline AI Terintegrasi**
 | Service | Deskripsi | Model/Algoritma |
@@ -168,15 +169,15 @@ docker-compose logs -f api
 ### Autentikasi
 Semua endpoint memerlukan header:
 ```http
-Authorization: Bearer <API_KEY>
+X-API-Key: <API_KEY>
 ```
 
 ### Contoh Penggunaan
 
 #### Registrasi Kamera
 ```bash
-curl -X POST "http://localhost:8000/api/v1/cameras" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -X POST "http://localhost:8000/cameras" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Cam-01",
@@ -190,8 +191,8 @@ curl -X POST "http://localhost:8000/api/v1/cameras" \
 
 #### Kalibrasi Kamera
 ```bash
-curl -X POST "http://localhost:8000/api/v1/cameras/1/calibrations" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -X POST "http://localhost:8000/cameras/1/calibrations" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -F "images=@chessboard1.jpg" \
   -F "images=@chessboard2.jpg" \
   -F "images=@chessboard3.jpg" \
@@ -202,8 +203,8 @@ curl -X POST "http://localhost:8000/api/v1/cameras/1/calibrations" \
 
 #### Submit Ground Reference
 ```bash
-curl -X POST "http://localhost:8000/api/v1/cameras/1/ground-references" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -X POST "http://localhost:8000/cameras/1/ground-references" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "points": [
@@ -217,16 +218,18 @@ curl -X POST "http://localhost:8000/api/v1/cameras/1/ground-references" \
 
 #### Jalankan Prediksi
 ```bash
-curl -X POST "http://localhost:8000/api/v1/cameras/1/predict" \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -X POST "http://localhost:8000/cameras/1/predict" \
+  -H "X-API-Key: YOUR_API_KEY" \
   -F "image=@scene.jpg" \
-  -F "confidence_threshold=0.5"
+  -F "source_type=upload" \
+  -F "seg_conf=0.5"
 ```
+Respons `202 Accepted` berisi `job_id` untuk polling status.
 
 #### Cek Status Job
 ```bash
-curl -X GET "http://localhost:8000/api/v1/cameras/1/predict/{job_id}" \
-  -H "Authorization: Bearer YOUR_API_KEY"
+curl -X GET "http://localhost:8000/cameras/1/predict/{job_id}" \
+  -H "X-API-Key: YOUR_API_KEY"
 ```
 
 ---
@@ -234,14 +237,11 @@ curl -X GET "http://localhost:8000/api/v1/cameras/1/predict/{job_id}" \
 ## 🧪 Testing
 
 ```bash
-# Unit tests
+# Unit tests (tanpa database)
 docker-compose exec api pytest tests/ -v
 
-# API integration tests
-docker-compose exec api python test_api_client.py
-
-# Test import semua modul
-docker-compose exec api python test_api_imports.py
+# Jalankan semua tes
+pytest tests/ -v
 ```
 
 ---

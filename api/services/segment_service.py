@@ -132,7 +132,7 @@ async def run_segmentation(
     # Predict instances
     instances, names = predict_instances(
         image, str(seg_model_path),
-        device="cpu", imgsz=job.seg_conf and settings.DEFAULT_SEG_IMGSZ or settings.DEFAULT_SEG_IMGSZ,
+        device="cpu", imgsz=settings.DEFAULT_SEG_IMGSZ,
         conf=job.seg_conf
     )
     
