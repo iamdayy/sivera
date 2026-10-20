@@ -153,12 +153,12 @@ async def serve_artefact(
         media_type=content_type or "application/octet-stream",
     )
 
-# Include routers
-app.include_router(cameras.router)
-app.include_router(calibrations.router)
-app.include_router(ground_refs.router)
-app.include_router(ground_refs.model_router)
-app.include_router(predictions.router)
+# Include routers (all under /api/v1 prefix with proper sub-paths)
+app.include_router(cameras.router, prefix="/api/v1/cameras")
+app.include_router(calibrations.router, prefix="/api/v1/cameras/{camera_id}/calibrations")
+app.include_router(ground_refs.router, prefix="/api/v1/cameras/{camera_id}/ground-references")
+app.include_router(ground_refs.model_router, prefix="/api/v1/cameras/{camera_id}/ground-models")
+app.include_router(predictions.router, prefix="/api/v1/cameras/{camera_id}/predict")
 
 
 @app.get("/health")

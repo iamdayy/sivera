@@ -25,7 +25,7 @@ from api.services.prediction_orchestrator import submit_prediction_job
 from api.workers.celery_app import celery_app
 
 
-router = APIRouter(prefix="/cameras/{camera_id}/predict", tags=["predictions"])
+router = APIRouter(tags=["predictions"])
 
 
 @router.post("", response_model=PredictionJobSubmitResponse, status_code=status.HTTP_202_ACCEPTED)

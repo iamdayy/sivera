@@ -21,7 +21,7 @@ from api.services.ground_model_service import (
 from api.core.storage import get_storage
 
 
-router = APIRouter(prefix="/cameras/{camera_id}/ground-references", tags=["ground-references"])
+router = APIRouter(tags=["ground-references"])
 
 
 @router.post("", response_model=GroundReferenceResponse, status_code=status.HTTP_201_CREATED)
@@ -226,7 +226,7 @@ async def activate_ground_reference(
 
 
 # Ground Model routes
-model_router = APIRouter(prefix="/cameras/{camera_id}/ground-models", tags=["ground-models"])
+model_router = APIRouter(tags=["ground-models"])
 
 
 @model_router.get("/active", response_model=GroundModelResponse)

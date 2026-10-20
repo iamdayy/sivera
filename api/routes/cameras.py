@@ -18,7 +18,7 @@ from api.services.calibration_service import process_calibration_upload
 from api.core.storage import get_storage, generate_storage_key
 
 
-router = APIRouter(prefix="/cameras", tags=["cameras"])
+router = APIRouter(tags=["cameras"])
 
 
 @router.post("", response_model=CameraResponse, status_code=status.HTTP_201_CREATED)

@@ -18,7 +18,7 @@ from api.services.calibration_service import process_calibration_upload, undisto
 from api.core.storage import get_storage, validate_image_content
 
 
-router = APIRouter(prefix="/cameras/{camera_id}/calibrations", tags=["calibrations"])
+router = APIRouter(tags=["calibrations"])
 
 
 @router.post("", response_model=CalibrationResponse, status_code=status.HTTP_201_CREATED)
@@ -87,6 +87,7 @@ async def create_calibration(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        print(f"Calibration processing error: {e}")
         await db.rollback()
         raise HTTPException(
             status_code=500,
