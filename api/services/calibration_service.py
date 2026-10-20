@@ -230,9 +230,11 @@ async def process_calibration_upload(
             storage = get_storage()
             preview_key = generate_storage_key(str(camera.id), output_type="calib_preview", extension="jpg")
             import io
-            buf = io.BytesIO()
-            cv2.imwrite(buf, undist, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            buf.seek(0)
+            # Use imencode to encode to memory buffer (imwrite doesn't support BytesIO in OpenCV 4.11+)
+            success, buf_arr = cv2.imencode(".jpg", undist, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not success:
+                raise RuntimeError("Failed to encode calibration preview image")
+            buf = io.BytesIO(buf_arr.tobytes())
             storage.save(preview_key, buf, "image/jpeg")
         
         return calibration
