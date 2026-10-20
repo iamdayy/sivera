@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import boto3
 from botocore.exceptions import ClientError
-from api.core.config import settings
+from api.core.config import settings, STORAGE_ROOT
 
 
 class StorageBackend(ABC):
