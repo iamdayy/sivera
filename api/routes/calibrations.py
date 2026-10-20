@@ -88,7 +88,10 @@ async def create_calibration(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=500, detail=f"Calibration failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Calibration failed. See server logs for details.",
+        )
 
 
 @router.get("", response_model=CalibrationListResponse)

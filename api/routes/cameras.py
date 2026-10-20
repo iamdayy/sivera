@@ -158,6 +158,10 @@ async def update_camera(
         else:
             camera.roi_polygon = None
     
+    # Handle metadata separately (ORM attribute is metadata_, not metadata)
+    if "metadata" in update_data:
+        camera.metadata_ = update_data.pop("metadata")
+    
     # Update remaining fields
     for key, value in update_data.items():
         if hasattr(camera, key):

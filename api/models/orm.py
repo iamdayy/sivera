@@ -380,7 +380,11 @@ class ApiKey(Base):
     )
     key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    scopes: Mapped[list] = mapped_column(JSON, default=["predict", "read"], nullable=False)
+    scopes: Mapped[list] = mapped_column(
+        JSON,
+        default=["camera:read", "calibration:read", "ground_ref:read", "predict:read"],
+        nullable=False,
+    )
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

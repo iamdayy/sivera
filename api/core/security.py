@@ -4,6 +4,9 @@ from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+import hmac
+import hashlib
+
 from api.core.config import settings
 from api.core.database import get_db
 from api.models.orm import ApiKey
@@ -49,9 +52,15 @@ async def verify_api_key(
 
 
 def hash_key(key: str) -> str:
-    """Hash API key for storage."""
-    import hashlib
-    return hashlib.sha256(key.encode()).hexdigest()
+    """Hash API key for storage using HMAC-SHA256 with SECRET_KEY.
+    
+    Stronger than plain SHA-256: requires the application secret to verify.
+    """
+    return hmac.new(
+        settings.SECRET_KEY.encode(),
+        key.encode(),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def generate_api_key() -> tuple[str, str]:

@@ -20,7 +20,8 @@ from api.schemas.prediction import (
     PredictionOutputsResponse, PredictionOutputResponse,
     DetectedInstanceResponse, VolumeEstimateResponse
 )
-from api.services.prediction_orchestrator import submit_prediction_job, run_prediction_pipeline
+from api.services.prediction_orchestrator import submit_prediction_job
+from api.workers.celery_app import celery_app
 
 
 router = APIRouter(prefix="/cameras/{camera_id}/predict", tags=["predictions"])
@@ -134,36 +135,28 @@ async def submit_prediction(
     await db.commit()
     await db.refresh(job)
     
-    # TODO: Queue as Celery task instead of running synchronously
-    # For now, run synchronously (will block)
+    # Queue prediction as Celery task (true asynchronous, matches 202 Accepted)
     try:
-        # Load image
-        if source_type == "upload" and source_path:
-            storage = get_storage()
-            img_data = storage.get(source_path)
-            if img_data:
-                import numpy as np
-                img_array = np.frombuffer(img_data.read(), np.uint8)
-                image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            else:
-                raise ValueError("Failed to load uploaded image")
-        else:
-            raise NotImplementedError("RTSP sources not yet implemented")
-        
-        # Run pipeline
-        await run_prediction_pipeline(db, job, image)
-        
-        return PredictionJobSubmitResponse(
-            job_id=job.id,
-            status=job.status,
-            message="Prediction completed",
-            estimated_duration_sec=30,
+        celery_app.send_task(
+            "api.workers.tasks.predict_task.run_prediction_task",
+            args=[str(job.id)],
         )
     except Exception as e:
+        # If queueing fails, mark job failed and return 503
         job.status = "failed"
-        job.error_msg = str(e)
+        job.error_msg = "Prediction queue unavailable"
         await db.commit()
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Prediction queue unavailable. Please try again later.",
+        )
+
+    return PredictionJobSubmitResponse(
+        job_id=job.id,
+        status="pending",
+        message="Prediction accepted for asynchronous processing",
+        estimated_duration_sec=30,
+    )
 
 
 @router.get("/{job_id}", response_model=PredictionJobResponse)
