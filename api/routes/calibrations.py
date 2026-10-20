@@ -219,21 +219,24 @@ async def get_undistort_preview(
     if not calibration.calib_images:
         raise HTTPException(status_code=400, detail="No calibration images available")
     
-    # Load first calibration image
+    # Load first calibration image from permanent storage
     import cv2
     import numpy as np
-    first_img_path = calibration.calib_images[0]
-    img = cv2.imread(first_img_path)
+    import io
+    
+    storage = get_storage()
+    first_img_key = calibration.calib_images[0]
+    img_data = storage.get(first_img_key)
+    if img_data is None:
+        raise HTTPException(status_code=400, detail="Calibration image not found in storage")
+    
+    img_array = np.frombuffer(img_data.read(), np.uint8)
+    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
     if img is None:
-        raise HTTPException(status_code=400, detail="Cannot read calibration image")
+        raise HTTPException(status_code=400, detail="Cannot decode calibration image")
     
     K = np.array(calibration.k_matrix, np.float64)
     dist = np.array(calibration.dist_coeffs, np.float64)
-    
-    # Note: stored k_matrix is K_undist, we need original K for undistort
-    # For preview, we'll use the stored K_undist as target
-    # Actually we need the original K - this is a limitation of current schema
-    # For now, generate preview using K_undist as if it were the target
     
     storage = get_storage()
     preview_key = f"cameras/{camera_id}/calibrations/{calibration_id}/preview.jpg"
@@ -246,7 +249,17 @@ async def get_undistort_preview(
             k_undist=calibration.k_matrix,
         )
     
-    # Generate preview (simplified - just return the stored K_undist info)
+    # Generate preview if not cached
+    undist = cv2.undistort(img, K, dist, None, K)
+    
+    import io
+    success, buf_arr = cv2.imencode(".jpg", undist, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to encode preview image")
+    
+    buf = io.BytesIO(buf_arr.tobytes())
+    storage.save(preview_key, buf, "image/jpeg")
+    
     return UndistortPreviewResponse(
         preview_url=storage.get_url(preview_key),
         original_size=[img.shape[1], img.shape[0]],

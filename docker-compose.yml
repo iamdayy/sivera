@@ -41,6 +41,7 @@ services:
       - ./api:/app/api
       - ./models:/models
       - ./data:/data
+      - ./test:/app/test
     ports:
       - "8000:8000"
     depends_on:
@@ -70,6 +71,7 @@ services:
       - ./api:/app/api
       - ./models:/models
       - ./data:/data
+      - ./test:/app/test
     depends_on:
       postgres:
         condition: service_healthy

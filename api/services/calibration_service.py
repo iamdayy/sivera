@@ -179,7 +179,11 @@ async def process_calibration_upload(
     rows = rows or settings.DEFAULT_CHESSBOARD_ROWS
     square_m = square_m or settings.DEFAULT_SQUARE_M
     
-    # Save uploaded images to temp directory
+    # Save uploaded images to permanent storage
+    storage = get_storage()
+    image_storage_keys = []
+    image_paths_for_calibration = []  # Local paths for calibration processing
+    
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         image_paths = []
@@ -195,8 +199,16 @@ async def process_calibration_upload(
         if len(image_paths) < settings.MIN_CALIB_IMAGES:
             raise ValueError(f"Need at least {settings.MIN_CALIB_IMAGES} valid chessboard images")
         
-        # Run calibration
+        # Run calibration using local temp files
         result = calibrate_from_images(image_paths, cols, rows, square_m, alpha)
+        
+        # Upload original images to permanent storage
+        for i, local_path in enumerate(image_paths):
+            ext = local_path.suffix
+            storage_key = generate_storage_key(str(camera.id), output_type="calib_images", extension=ext.lstrip('.'))
+            with open(local_path, 'rb') as f:
+                storage.save(storage_key, f, "image/jpeg")
+            image_storage_keys.append(storage_key)
         
         # Determine next version number
         from sqlalchemy import select, func
@@ -205,7 +217,7 @@ async def process_calibration_upload(
         )
         next_version = (max_ver.scalar() or 0) + 1
         
-        # Save to database
+        # Save to database with permanent storage keys
         calibration = await save_calibration_to_db(
             db=db,
             camera=camera,
@@ -216,6 +228,10 @@ async def process_calibration_upload(
             chessboard_rows=rows,
             square_m=square_m,
         )
+        
+        # Update calib_images with permanent storage keys instead of temp paths
+        calibration.calib_images = image_storage_keys
+        await db.flush()
         
         # Also save undistort preview if we have a test image
         if image_paths:
@@ -230,7 +246,6 @@ async def process_calibration_upload(
             storage = get_storage()
             preview_key = generate_storage_key(str(camera.id), output_type="calib_preview", extension="jpg")
             import io
-            # Use imencode to encode to memory buffer (imwrite doesn't support BytesIO in OpenCV 4.11+)
             success, buf_arr = cv2.imencode(".jpg", undist, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if not success:
                 raise RuntimeError("Failed to encode calibration preview image")
