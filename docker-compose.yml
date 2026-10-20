@@ -85,6 +85,12 @@ services:
       - PYTHONPATH=/app
     env_file:
       - .env
+    healthcheck:
+      test: ["CMD", "celery", "-A", "api.workers.celery_app", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   flower:
     build:
@@ -102,6 +108,12 @@ services:
     working_dir: /app
     volumes:
       - ./api:/app/api
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-u", "user:pass", "http://localhost:5555"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
 volumes:
   pgdata:
