@@ -34,8 +34,8 @@ class PredictionJobResponse(BaseModel):
     depth_scale_id: UUID
     status: str
     source_type: str
-    source_path: Optional[str]
-    source_ts: Optional[datetime]
+    source_path: Optional[str] = Field(description="Private-storage key, not a public URL or filesystem path")
+    source_ts: Optional[datetime] = Field(description="Upload caller timestamp or RTSP worker-reception UTC time; not sensor time")
     max_frame_age_sec: int = 30
     volume_cell_m: float = 0.05
     volume_min_pts_per_cell: int = 2
@@ -56,7 +56,7 @@ class PredictionJobSubmitResponse(BaseModel):
     job_id: UUID
     status: str
     message: str
-    estimated_duration_sec: int = 30
+    estimated_duration_sec: int = Field(30, description="Fixed advisory estimate, not measured progress or an SLA")
 
 
 class PredictionJobListResponse(BaseModel):
@@ -71,7 +71,7 @@ class PredictionOutputResponse(BaseModel):
     id: UUID
     job_id: UUID
     output_type: str
-    file_path: str
+    file_path: str = Field(description="Storage key, not a public URL; download through the authenticated job output endpoint")
     mime_type: Optional[str]
     width: Optional[int]
     height: Optional[int]

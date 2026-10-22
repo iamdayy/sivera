@@ -36,12 +36,22 @@ async def get_capture(db: AsyncSession, camera_id: UUID, session_id: UUID, api_k
     return session
 
 
-@router.post("", response_model=CaptureResponse, status_code=202)
+@router.post("", response_model=CaptureResponse, status_code=202, responses={
+    409: {"description": "Enabled RTSP stream required or a capture is already active"},
+    503: {"description": "Database or stream configuration unavailable"},
+})
 async def start_capture(
     camera_id: UUID, body: CaptureCreate,
     db: AsyncSession = Depends(get_db), api_key: ApiKey = Depends(require_scope("calibration:write")),
     service: MediaMTXService = Depends(get_mediamtx),
 ) -> CaptureResponse:
+    """Start accepted-frame capture without waiting for camera frames.
+
+    Requires calibration:write and an enabled stream. HTTP 202 persists a queued
+    session even if broker dispatch fails; the API reconciler retries dispatch.
+    Poll the returned session_id. completed means the capture target was reached,
+    not that calibration succeeded. Queue time counts toward the deadline.
+    """
     check_camera_access(api_key, camera_id)
     camera = (await db.execute(select(Camera.id, Camera.rtsp_url, Camera.stream_enabled).where(
         Camera.id == camera_id,
@@ -154,7 +164,9 @@ async def image_response(storage_key: str) -> StreamingResponse:
     })
 
 
-@router.get("/{session_id}/images/{image_id}", response_class=StreamingResponse, responses={200: {"content": {"image/jpeg": {}}}})
+@router.get("/{session_id}/images/{image_id}", response_class=StreamingResponse, responses={
+    200: {"content": {"image/jpeg": {"schema": {"type": "string", "format": "binary"}}}},
+})
 async def download_capture_image(
     camera_id: UUID, session_id: UUID, image_id: UUID, db: AsyncSession = Depends(get_db),
     api_key: ApiKey = Depends(require_scope("calibration:read")),
@@ -169,7 +181,9 @@ async def download_capture_image(
     return await image_response(image.storage_key)
 
 
-@router.get("/{session_id}/images/{image_id}/preview", response_class=StreamingResponse, responses={200: {"content": {"image/jpeg": {}}}})
+@router.get("/{session_id}/images/{image_id}/preview", response_class=StreamingResponse, responses={
+    200: {"content": {"image/jpeg": {"schema": {"type": "string", "format": "binary"}}}},
+})
 async def preview_capture_image(
     camera_id: UUID, session_id: UUID, image_id: UUID, db: AsyncSession = Depends(get_db),
     api_key: ApiKey = Depends(require_scope("calibration:read")),
@@ -201,11 +215,20 @@ async def preview_capture_image(
     return StreamingResponse(BytesIO(content), media_type="image/jpeg", headers={"Cache-Control": "private, no-store"})
 
 
-@router.post("/{session_id}/compute", response_model=CaptureResponse, status_code=202)
+@router.post("/{session_id}/compute", response_model=CaptureResponse, status_code=202, responses={
+    409: {"description": "Capture still active or insufficient usable frames (default minimum 10)"},
+})
 async def compute_capture(
     camera_id: UUID, session_id: UUID, db: AsyncSession = Depends(get_db),
     api_key: ApiKey = Depends(require_scope("calibration:write")),
 ) -> CaptureResponse:
+    """Queue computation for a terminal capture with enough selected views.
+
+    Requires calibration:write. queued/running/done requests reuse computation;
+    failed computation can be retried explicitly. Poll compute_status separately
+    from capture status. A successful result_calibration_id is inactive and must
+    be explicitly activated. Legacy stored frames are quality-assessed first.
+    """
     from api.core.config import settings
     session = await get_capture(db, camera_id, session_id, api_key)
     if session.status in ACTIVE_STATUSES:

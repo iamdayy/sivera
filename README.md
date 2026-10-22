@@ -341,6 +341,26 @@ Endpoint kamera/artifact memerlukan header (root, health, dan dokumentasi tetap 
 X-API-Key: <API_KEY>
 ```
 
+Header hilang saat ini mendapat 422, key tidak valid/tidak aktif 401, dan scope atau akses kamera ditolak 403. Error `detail` dapat berupa string, objek `{code: ...}`, atau daftar validasi. `/health` selalu mengembalikan 200 jika probe selesai; baca `status` dan `database` untuk membedakan healthy dari degraded. Endpoint ini tidak memeriksa Redis, worker, MediaMTX, atau validitas key.
+
+### Kontrak OpenAPI
+
+Kamera dipasang eksplisit di `/api/v1/cameras`; `/files` dan `/health` berada di luar prefix. Ekspor snapshot dari root repository:
+
+```bash
+python api/scripts/export_openapi.py openapi.json
+```
+
+Exporter memakai proses dengan environment kosong dan direktori sementara tanpa `.env`, tanpa koneksi layanan atau startup aplikasi. Snapshot memakai default, bukan konfigurasi deployment; `/openapi.json` live tetap menjadi acuan jika default berubah. Snapshot yang sama disediakan di `../sivera-dashboard/openapi.json`, dengan plan integrasi di `.agents/plan/mediamtx-integration.md` pada repository dashboard.
+
+Download gambar/output memerlukan `X-API-Key`: frontend harus mengambil blob melalui HTTP berautentikasi, bukan `<img src>` atau link biasa. Jangan menambahkan key ke query string. Simpan `Location` backend dan `ETag` WHEP untuk PATCH/DELETE memakai key pemilik yang sama.
+
+### Batas readiness dan keamanan
+
+Tidak ada API publik untuk membuat atau memeriksa depth scale. Operator harus menyediakan scale terverifikasi untuk ground model yang kompatibel; setup kamera/kalibrasi/referensi tanah belum menjamin prediksi dapat berjalan. `estimated_duration_sec=30` hanya angka advisory tetap, bukan progress atau SLA.
+
+Gap legacy belum diperbaiki: handler ground-reference/model belum membatasi key terikat kamera, autentikasi key database belum memeriksa `expires_at`, dan cabang fallback `/files` belum menerapkan semua scope/registrasi artifact. Jangan mengklaim isolasi tenant penuh atau enforcement expiry; perbaikan terfokus dan regresinya diperlukan sebelum deployment multi-tenant.
+
 ### Contoh Penggunaan
 
 #### Registrasi Kamera

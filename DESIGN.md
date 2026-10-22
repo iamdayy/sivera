@@ -1,4 +1,4 @@
-# SIVERA Backend — Design Specification
+# SIVERA Backend: Design Specification
 
 ## 1. Purpose and ownership
 
@@ -19,7 +19,7 @@ This repository (`iamdayy/sivera`) owns the backend API, persistence, storage in
 - **API documentation:** `/docs`, `/redoc`, and `/openapi.json`.
 - **Health check:** `/health`.
 
-Routers are included directly by `api/main.py`. Do not assume a global `/api/v1` prefix unless it is explicitly mounted.
+`api/main.py` explicitly mounts camera operations at `/api/v1/cameras`. `/files`, `/health`, and `/` are outside that prefix. `settings.API_PREFIX` does not control router mounting. The dashboard should configure the API origin once and keep exact operation paths in its HTTP layer.
 
 ## 3. Conceptual processing flow
 
@@ -76,6 +76,7 @@ This is a conceptual view. Preserve the service interfaces and ordering actually
 - `api/services/prediction_worker_service.py`: durable prediction claims, source/freshness checks, completion fencing, and stale-job reconciliation.
 - `api/workers/`: Celery tasks, per-task async database contexts, and killable OpenCV subprocesses.
 - `api/alembic/`: schema migrations.
+- `api/scripts/export_openapi.py`, `openapi.json`: reproducible default-settings OpenAPI export for contract review/dashboard integration.
 
 ## 5. Domain invariants
 
@@ -83,6 +84,7 @@ This is a conceptual view. Preserve the service interfaces and ordering actually
 - Calibration and ground-reference records are versioned per camera. Activation should not leave conflicting active versions for the same camera.
 - Image points and world points must correspond one-to-one and meet the algorithm's minimum-point requirements.
 - Prediction submission pins an active camera calibration, the latest ground model linked to an active reference for that calibration, and an active depth scale for that ground model. Versions from another camera/calibration/ground model must not be mixed. Activation changes do not rewrite already-pinned jobs.
+- There is no public depth-scale create/readiness endpoint. Operators must provision a verified scale linked to the selected ground model; camera/calibration/ground setup alone does not prove prediction readiness. The legacy ground-model `/active` lookup is not a complete compatibility/readiness check.
 - Keep image coordinates, world coordinates, camera pose, depth scale/bias, and physical units explicit. Never silently reinterpret coordinate systems.
 - Distinguish volume estimation methods. The current grid method sums cell median heights × cell area; the method named `convex_hull` multiplies a 2D footprint-hull area by median height, not a true 3D hull volume.
 - Missing or failed estimates must not be converted into zero.
@@ -92,11 +94,13 @@ This is a conceptual view. Preserve the service interfaces and ordering actually
 ## 6. API contract and current caveats
 
 - Authentication uses the `X-API-Key` header. Keys may be configured through `VALID_API_KEYS` and/or stored hashed in the database. Scope checks cover camera, calibration, ground-reference, and prediction operations.
+- Public endpoints are `/`, `/health`, `/docs`, `/redoc`, and `/openapi.json`; `/files` and camera-domain operations require authentication. Missing headers currently return 422, invalid/inactive keys 401, and scope/camera denial 403. Environment-configured keys have wildcard scopes and are not appropriate browser-build secrets.
 - Prefer live `/openapi.json`, route declarations, and schema code over potentially stale README examples.
 - Current route prefixes are mounted explicitly under `/api/v1/cameras` in `api/main.py`, including calibrations, ground references, streams, and predictions. Verify OpenAPI before changing them.
 - Prediction supports `upload`, `rtsp_frame`, and `latest_rtsp` as multipart form sources. The route commits a pending job before Celery dispatch and returns HTTP 202; workers persist `processing -> done/failed`. Broker failure returns 503 and marks the pending job failed. Stale jobs fail rather than being automatically redispatched.
 - RTSP sources disallow caller-supplied file/timestamp. They require enabled streams and original intrinsics with matching captured dimensions; legacy calibrations without original K require recalibration. Legacy upload predictions retain the historical already-undistorted input contract.
 - Validate response models and ensure OpenAPI accurately reflects multipart fields and response shapes.
+- `estimated_duration_sec=30` is a fixed advisory submission field, not a measured duration, progress percentage, or SLA. Persistent job listing is available per camera with `page`, `page_size`, and optional `status`; deletion/cancellation endpoints are not available.
 - Use stable, actionable HTTP errors. Do not expose stack traces, secrets, or internal filesystem paths in responses.
 
 ## 7. Errors and observability
@@ -106,7 +110,8 @@ This is a conceptual view. Preserve the service interfaces and ordering actually
 - Keep API errors predictable and machine-readable.
 - Log request/job lifecycle, pipeline stage, duration, and failures with useful identifiers where possible.
 - Never log API keys, RTSP credentials, or raw image contents.
-- Health checks should accurately reflect dependency health; if semantics are expanded, check the database rather than reporting it connected unconditionally.
+- `/health` probes PostgreSQL and returns HTTP 200 with `healthy/connected` or `degraded/disconnected`; clients must read the body, not only the status code. It does not test API-key validity, Redis, workers, MediaMTX, model loading, or camera availability.
+- Error `detail` is not uniform: legacy strings, safe `{code: ...}` objects, and FastAPI validation lists coexist. Clients must normalize all three without discarding machine-readable codes; no schema migration or global error-envelope change is part of this integration.
 
 ## 8. Security and deployment
 
@@ -118,6 +123,8 @@ This is a conceptual view. Preserve the service interfaces and ordering actually
 - Keep model weights and generated artifacts out of source control unless deliberately required.
 - Apply schema changes through reviewed migrations; do not rely on startup side effects to mutate production schema.
 - Document container permissions, storage mounts, required environment settings, and external services.
+- API-key hashes, WHEP ownership, and source HMAC depend on the same stable `SECRET_KEY`; replacing it without a migration invalidates stored key hashes and identities.
+- Known legacy security gaps remain outside the MediaMTX implementation: ground-reference/model handlers do not enforce camera-bound key restrictions, database authentication ignores `expires_at`, and generic artifact fallback branches do not enforce every domain scope/registration. New capture/snapshot/prediction paths have scoped/camera-bound regression coverage, but the complete API must not be represented as tenant-isolated. Fix these gaps before multi-tenant production deployment.
 
 ## 9. Testing strategy
 
@@ -171,3 +178,39 @@ A backend change is complete when it preserves or documents API compatibility, i
 - Durable pending-to-processing claims ignore duplicate tasks. The worker rolls back failed processing writes, publishes only safe error codes, and rechecks source identity and processing status under row locks before completion. Reconciliation fails pending jobs after the queue timeout and processing jobs after the Celery hard limit plus 60 seconds. A dead worker is not resumed automatically; the operator submits a new job.
 - Missing grid support or degenerate footprint hulls produce null summary/instance estimates and no corresponding `VolumeEstimate` row; numeric NPZ estimates use NaN. Grid allocation is capped at 1,000,000 cells. Volumes use m³/L, footprint m², and heights meters; neither method is a full 3D reconstruction.
 - Disposable integration verifies real RTSP capture, migrations, storage, Celery transitions/failures, prerequisite compatibility, output selection, image encoding, geometry, and polling. Successful prediction integration mocks segmentation/depth inference; real camera accuracy, model weights/GPU inference, browser ICE/playback/reconnect, dashboard integration, TLS/TURN, and production deployment remain unverified.
+
+## 15. Published API contract and dashboard handoff
+
+| Domain | Paths relative to `/api/v1/cameras/{camera_id}` | Submission/completion contract |
+|---|---|---|
+| Stream | `GET/PATCH /stream`, `OPTIONS/POST /stream/whep`, `PATCH/DELETE /stream/whep/{session_id}` | PATCH stores desired state; GET reports synchronization/runtime separately. Offer POST returns 201 SDP plus backend Location; PATCH returns 204 or 200 ICE-restart fragment; DELETE returns 204. |
+| Calibration capture | `POST /calibration-captures`, `GET /calibration-captures/{session_id}`, `POST /calibration-captures/{session_id}/stop`, `GET /calibration-captures/{session_id}/images`, image/preview GET | JSON start returns 202 and `session_id`; status uses accepted/rejected counters, deadline, and independent computation state. Image pagination uses `offset`/`limit`. There is no session-list endpoint. |
+| Capture computation | `POST /calibration-captures/{session_id}/compute` | 202; poll `compute_status` on the capture status endpoint. Terminal capture and enough selected views required. Fetch resulting calibration, inspect, then explicitly activate. |
+| Snapshot | `POST /snapshots`, `GET /snapshots/latest`, `GET /snapshots/{snapshot_id}/image` | Synchronous 201 capture; latest GET never captures. Default age 30 seconds, range 1..300. Authenticated JPEG download is separate from metadata. |
+| Prediction | `POST/GET /predict`, job GET and `/outputs`, `/outputs/{output_type}`, `/instances`, `/volumes` | Multipart POST returns 202 and `job_id`; GET job reports `pending/processing/done/failed`. Output selection affects registered downloads, not result summaries. |
+
+All camera/job/session/image/snapshot IDs are UUIDs. Capture uses `session_id` in responses; prediction submission uses `job_id`, while persisted job reads use `id`. Stream desired `enabled`, runtime `status`, and `synced` are distinct. `idle` is not proof the camera is online or offline; `online` is not proof a browser has decoded video.
+
+Preview/download requests require header authentication; an `<img src>` or ordinary link cannot attach `X-API-Key`. Dashboard adapters should fetch bytes into revocable blob URLs or use a deliberately authenticated server-side proxy. Prefer dedicated capture/snapshot/output URLs to raw storage keys. Preserve backend `Location`/`ETag` and the owning key across WHEP cleanup. Never send application keys to untrusted URL origins.
+
+OpenAPI custom generation derives security from FastAPI's actual `X-API-Key` dependency parameter, removes that duplicate header parameter after registering `ApiKeyAuth`, and leaves public operations with `security: []`. Root/health now have explicit response schemas; binary artifact/output endpoints expose their actual content types; WHEP documents SDP, ICE fragments, response headers, and optional `If-Match`. Field documentation preserves raw/undistorted coordinates, capture/compute distinctions, freshness, and multipart output selection without changing their wire formats.
+
+This contract/documentation update adds no persistence fields or migration; revision `005_capture_quality_snapshots` remains the migration head. Dashboard implementation is not part of the handoff.
+
+Generate the contract from the repository root:
+
+```bash
+python api/scripts/export_openapi.py openapi.json
+```
+
+The exporter imports the app in a child process with an empty environment and a temporary working directory without `.env`, without contacting PostgreSQL/storage/MediaMTX or starting lifespan tasks. This also bypasses invalid local settings before the initial configuration import. The checked-in snapshot is reproducible and secret-free; a deployment can change configuration-derived defaults, so live `/openapi.json` remains authoritative. The dashboard receives the same JSON snapshot at `../sivera-dashboard/openapi.json`; its existing services/types/views still need the separate integration plan in `.agents/plan/mediamtx-integration.md`. Historical dashboard plans and documentation may describe obsolete prefixes or RTSP behavior.
+
+## 16. Verification and local database operation (22 October 2026)
+
+Implementation commits are `704c7d3` (phases 1–2) and `b775270` (phases 3–4); they have not been pushed. Final re-verification after the contract/documentation update ran **242 passing local tests with 12 opt-in integration skips**, **9 passing capture/calibration/prediction integration tests**, and **3 passing stream/WHEP integration tests**. Integration resources were disposable PostgreSQL/PostGIS, Redis, MediaMTX `bluenviron/mediamtx:1.20.0-ffmpeg`, synthetic H264 RTSP, storage, and Celery. Prediction inference was mocked; camera capture, migrations, encoding, geometry, and persisted polling were real. The live ASGI OpenAPI paths/components matched the published contract after excluding configuration-dependent defaults. Export reproducibility, resistance to invalid environment/`.env` settings, local references/unique operation IDs, component JSON Schema syntax, multipart fields, WHEP headers, compile, migration head, Compose structure with temporary credentials, and diff whitespace were checked. Starlette TestClient and Compose's obsolete version field produce existing deprecation warnings. Detailed commands/results are recorded in the local backend plan; frontend build/browser tests are not claimed.
+
+The user separately authorized discarding SIVERA application data in `waste_db` belonging to `waste-postgres`. Because local PostgreSQL occupied port 5432, a network-isolated maintenance container used the original image ID and `sivera_pgdata` volume while the original container stayed stopped. Ten legacy application tables had no Alembic history. They were dropped in dependency order with RESTRICT, then migrations 001 through `005_capture_quality_snapshots` ran in one transaction, without a guessed stamp or broad schema drop.
+
+Final database verification found the expected revision and 14 empty application tables, including database API keys; ORM column types/nullability and principal constraints/active-capture uniqueness matched. PostGIS extensions, 37 reference tables, and 8,500 `spatial_ref_sys` rows were retained. Artifact files, other databases, `.env`, local PostgreSQL, and the original container configuration were not changed. The maintenance container was stopped/removed without deleting the volume. This is a dated operation record, not a destructive setup recipe or proof of the current deployed database state.
+
+The original `waste-postgres` remains stopped with its 5432 binding conflict unresolved; existing local `DATABASE_URL` reaches the other PostgreSQL and rejects authentication. Database API keys must be provisioned again, and retained artifact files can be orphaned. MediaMTX passwords were empty in the inspected `.env`; deployment still needs credentials, allowlist, shared non-default secret, correct database target/port, writable shared storage, CORS/HTTPS/ICE settings, model weights, and real camera/browser verification.

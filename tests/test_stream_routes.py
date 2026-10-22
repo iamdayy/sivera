@@ -264,5 +264,13 @@ def test_openapi_whep_contract_and_cors_headers(setup):
     assert "application/sdp" in path["post"]["responses"]["201"]["content"]
     assert path["post"]["security"] == [{"ApiKeyAuth": []}]
     assert "options" in path
+    assert {"Location", "ETag", "Link"} <= set(path["post"]["responses"]["201"]["headers"])
+    assert "Accept-Post" in path["options"]["responses"]["204"]["headers"]
+    patch = schema["paths"]["/api/v1/cameras/{camera_id}/stream/whep/{session_id}"]["patch"]
+    assert "application/trickle-ice-sdpfrag" in patch["requestBody"]["content"]
+    assert any(parameter["name"] == "If-Match" and parameter["required"] is False for parameter in patch["parameters"])
+    assert "ETag" in patch["responses"]["200"]["headers"]
+    assert "ETag" in patch["responses"]["204"]["headers"]
+    assert "content" not in patch["responses"]["204"]
     middleware = next(m for m in app.user_middleware if m.cls.__name__ == "CORSMiddleware")
     assert set(["Location", "ETag", "Link"]) <= set(middleware.kwargs["expose_headers"])

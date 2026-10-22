@@ -23,17 +23,17 @@ class CalibrationResponse(BaseModel):
     id: UUID
     camera_id: UUID
     version: int
-    k_matrix: List[List[float]]
-    k_original: Optional[List[List[float]]] = None
-    k_undist: Optional[List[List[float]]] = None
-    resolution_w: Optional[int] = None
-    resolution_h: Optional[int] = None
+    k_matrix: List[List[float]] = Field(description="Undistorted camera intrinsics; legacy field retains this meaning")
+    k_original: Optional[List[List[float]]] = Field(None, description="Original raw-image intrinsics; null for legacy calibrations, never reconstructed by migration")
+    k_undist: Optional[List[List[float]]] = Field(None, description="Explicit target intrinsics for undistortion, equivalent to k_matrix for new calibrations")
+    resolution_w: Optional[int] = Field(None, description="Calibration image width in pixels")
+    resolution_h: Optional[int] = Field(None, description="Calibration image height in pixels")
     alpha: Optional[float] = None
-    per_view_errors: Optional[List[float]] = None
+    per_view_errors: Optional[List[float]] = Field(None, description="Per-view reprojection RMS errors in pixels")
     dist_coeffs: List[float]
-    rms_reproj: Optional[float]
-    coverage_w: Optional[float]
-    coverage_h: Optional[float]
+    rms_reproj: Optional[float] = Field(description="Overall reprojection RMS error in pixels")
+    coverage_w: Optional[float] = Field(description="Horizontal chessboard coverage in percent")
+    coverage_h: Optional[float] = Field(description="Vertical chessboard coverage in percent")
     chessboard_cols: Optional[int]
     chessboard_rows: Optional[int]
     square_m: Optional[float]

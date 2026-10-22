@@ -1,5 +1,6 @@
 """Opt-in checks against disposable PostgreSQL and MediaMTX instances."""
 import asyncio
+import json
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -140,7 +141,18 @@ def test_real_backend_stream_lifecycle(monkeypatch):
                 assert response.json()["stream_enabled"] is False
                 path = f"/api/v1/cameras/{camera_id}/stream"
                 assert (await client.get("/health")).json()["database"] == "connected"
-                assert (await client.get("/openapi.json")).status_code == 200
+                response = await client.get("/openapi.json")
+                assert response.status_code == 200
+                published = json.loads((Path(__file__).resolve().parents[1] / "openapi.json").read_text())
+                def without_defaults(value):
+                    if isinstance(value, dict):
+                        return {key: without_defaults(item) for key, item in value.items() if key != "default"}
+                    if isinstance(value, list):
+                        return [without_defaults(item) for item in value]
+                    return value
+                # Deployment settings may change defaults, but not the request/response/security contract.
+                for section in ("paths", "components"):
+                    assert without_defaults(response.json()[section]) == without_defaults(published[section])
                 assert (await client.patch(path, json={"enabled": True})).status_code == 200
                 response = await client.get(path)
                 assert response.status_code == 200, response.text

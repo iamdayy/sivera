@@ -138,7 +138,12 @@ async def read_sdp(request: Request, content_type: str, service: MediaMTXService
     return bytes(body)
 
 
-@router.options("/stream/whep", status_code=204)
+@router.options("/stream/whep", status_code=204, responses={
+    204: {"description": "Authenticated WHEP capabilities (not a CORS preflight)", "headers": {
+        "Accept-Post": {"schema": {"type": "string"}},
+        "Link": {"description": "ICE server links when returned by MediaMTX", "schema": {"type": "string"}},
+    }},
+})
 async def whep_options(
     camera_id: UUID, db: AsyncSession = Depends(get_db),
     api_key: ApiKey = Depends(require_scope("camera:read")), service: MediaMTXService = Depends(get_mediamtx),
@@ -151,7 +156,7 @@ async def whep_options(
 
 
 SDP_BODY = {"requestBody": {"required": True, "content": {"application/sdp": {"schema": {"type": "string"}}}}}
-SDP_RESPONSE = {201: {"description": "SDP answer and owned session Location", "content": {"application/sdp": {"schema": {"type": "string"}}}, "headers": {"Location": {"schema": {"type": "string"}}, "ETag": {"schema": {"type": "string"}}, "Link": {"schema": {"type": "string"}}}}}
+SDP_RESPONSE = {201: {"description": "SDP answer and owned backend session Location; do not retry offer POST automatically", "content": {"application/sdp": {"schema": {"type": "string"}}}, "headers": {"Location": {"description": "Backend URL for authenticated PATCH/DELETE with the same API key", "schema": {"type": "string"}}, "ETag": {"schema": {"type": "string"}}, "Link": {"schema": {"type": "string"}}}}}
 
 
 @router.post("/stream/whep", status_code=201, response_class=Response, responses=SDP_RESPONSE, openapi_extra=SDP_BODY)
@@ -197,8 +202,10 @@ async def owned_session(db: AsyncSession, camera_id: UUID, session_id: UUID, req
 
 
 @router.patch("/stream/whep/{session_id}", status_code=204, response_class=Response,
-    responses={200: {"description": "ICE restart answer", "content": {"application/trickle-ice-sdpfrag": {"schema": {"type": "string"}}}}},
-    openapi_extra={"requestBody": {"required": True, "content": {"application/trickle-ice-sdpfrag": {"schema": {"type": "string"}}}}})
+    responses={200: {"description": "ICE restart answer", "content": {"application/trickle-ice-sdpfrag": {"schema": {"type": "string"}}}, "headers": {"ETag": {"schema": {"type": "string"}}}},
+               204: {"description": "ICE fragment accepted", "headers": {"ETag": {"schema": {"type": "string"}}}}},
+    openapi_extra={"requestBody": {"required": True, "content": {"application/trickle-ice-sdpfrag": {"schema": {"type": "string"}}}},
+                   "parameters": [{"name": "If-Match", "in": "header", "required": False, "description": "ETag from the WHEP answer; forwarded when present", "schema": {"type": "string"}}]})
 async def whep_patch(
     camera_id: UUID, session_id: UUID, request: Request, db: AsyncSession = Depends(get_db),
     api_key: ApiKey = Depends(require_scope("camera:read")), service: MediaMTXService = Depends(get_mediamtx),

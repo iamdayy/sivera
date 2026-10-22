@@ -7,6 +7,7 @@ from typing import List, Optional
 from uuid import UUID
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update
 from sqlalchemy.orm import selectinload
@@ -37,24 +38,35 @@ from api.services.calibration_capture_service import utcnow
 router = APIRouter(tags=["predictions"])
 
 
-@router.post("", response_model=PredictionJobSubmitResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("", response_model=PredictionJobSubmitResponse, status_code=status.HTTP_202_ACCEPTED, responses={
+    400: {"description": "Upload file required or image invalid"},
+    409: {"description": "Compatible calibration/ground/depth prerequisite missing, stream disabled, or snapshot missing/stale"},
+    413: {"description": "Upload byte/pixel limit exceeded"},
+    503: {"description": "Storage/database submission failed or queue unavailable; do not assume a processing job exists"},
+})
 async def submit_prediction(
     camera_id: UUID,
     source_type: str = Form(..., pattern="^(upload|rtsp_frame|latest_rtsp)$",
                            description="upload: image file; rtsp_frame: fresh capture at worker execution; latest_rtsp: latest persisted snapshot at execution"),
-    timestamp: Optional[datetime] = Form(None),
+    timestamp: Optional[datetime] = Form(None, description="Caller timestamp for upload only; forbidden for RTSP sources"),
     seg_model: Optional[str] = Form(None),
     seg_conf: float = Form(0.25, ge=0, le=1, allow_inf_nan=False),
-    seg_classes: Optional[str] = Form(None),  # JSON string
+    seg_classes: Optional[str] = Form(None, description="JSON array of segmentation class names"),
     volume_cell_m: float = Form(0.05, gt=0, le=1, allow_inf_nan=False),
     volume_min_pts_per_cell: int = Form(2, ge=1, le=10000),
     max_frame_age_sec: int = Form(30, ge=1, le=300, description="Maximum RTSP snapshot age in seconds, checked again by the worker"),
-    return_outputs: Optional[str] = Form(None, description="JSON array of output types: omitted registers all, [] registers none. Internal artifacts may still be generated"),
-    file: Optional[UploadFile] = File(None),
+    return_outputs: Optional[str] = Form(None, description="JSON array of output types: omitted registers all, [] registers none. Valid types: " + ", ".join(sorted(PREDICTION_OUTPUT_TYPES)) + ". Internal artifacts may still be generated"),
+    file: Optional[UploadFile] = File(None, description="Required for upload, forbidden for RTSP. Raw image at calibration dimensions with explicit intrinsics; legacy calibrations require already-undistorted input"),
     db: AsyncSession = Depends(get_db),
     api_key: ApiKey = Depends(require_scope("predict:write")),
 ):
-    """Queue upload, worker-time RTSP capture, or a freshness-bounded persisted snapshot."""
+    """Queue upload, worker-time RTSP capture, or a freshness-bounded persisted snapshot.
+
+    HTTP 202 returns job_id, not a prediction result. Poll GET /predict/{job_id}
+    until done/failed. Calibration, ground reference/model, and depth scale must
+    belong to compatible active versions. estimated_duration_sec is a fixed
+    advisory value, not measured progress or a completion deadline.
+    """
     check_camera_access(api_key, camera_id)
     camera_result = await db.execute(select(Camera).where(Camera.id == camera_id))
     camera = camera_result.scalar_one_or_none()
@@ -237,7 +249,12 @@ async def get_prediction_outputs(
     )
 
 
-@router.get("/{job_id}/outputs/{output_type}")
+@router.get("/{job_id}/outputs/{output_type}", response_class=StreamingResponse, responses={
+    200: {"description": "Registered output bytes, selected by return_outputs",
+          "content": {media: {"schema": {"type": "string", "format": "binary"}} for media in
+                      ("image/jpeg", "image/png", "application/json", "application/octet-stream")}},
+    404: {"description": "Job/output not found, output not selected, or file missing"},
+})
 async def download_prediction_output(
     camera_id: UUID,
     job_id: UUID,

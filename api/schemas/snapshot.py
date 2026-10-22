@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SnapshotResponse(BaseModel):
@@ -10,5 +10,5 @@ class SnapshotResponse(BaseModel):
     width: int
     height: int
     size_bytes: int
-    captured_at: datetime
+    captured_at: datetime = Field(description="UTC worker-reception time, not the camera sensor timestamp")
     image_url: str

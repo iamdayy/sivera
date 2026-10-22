@@ -16,7 +16,7 @@ class CaptureCreate(BaseModel):
     interval_sec: float = Field(2, ge=1, le=60)
     target_images: int = Field(20, ge=1, le=100, description="Accepted chessboard frames for new sessions")
     max_duration_sec: int = Field(300, ge=1, le=900, description="Wall-clock limit from session creation, including queue time")
-    auto_calibrate: bool = False
+    auto_calibrate: bool = Field(False, description="Queue inactive calibration computation after completed/stopped/expired capture; insufficient accepted frames fail computation")
 
 
 class CaptureResponse(BaseModel):
@@ -32,18 +32,18 @@ class CaptureResponse(BaseModel):
     target_images: int
     max_duration_sec: int
     auto_calibrate: bool = False
-    selection_version: int = 0
-    accepted: int = 0
-    rejected: int = 0
+    selection_version: int = Field(0, description="1 targets accepted frames; legacy 0 targets stored frames, then quality-assesses them at computation")
+    accepted: int = Field(0, description="Frames accepted by chessboard, sharpness, and pose selection")
+    rejected: int = Field(0, description="Stored frames rejected by quality selection")
     rejection_counts: dict[str, int] = Field(default_factory=dict)
-    compute_status: str = "none"
+    compute_status: str = Field("none", description="Independent computation state: none, queued, running, done, failed")
     compute_error_code: str | None = None
     compute_requested_at: datetime | None = None
     compute_started_at: datetime | None = None
     compute_completed_at: datetime | None = None
-    result_calibration_id: UUID | None = None
-    attempted: int
-    captured: int
+    result_calibration_id: UUID | None = Field(None, description="Inactive calibration UUID after compute succeeds; explicitly activate it via calibrations endpoint")
+    attempted: int = Field(description="Attempts started; interrupted attempts need not equal captured + failed_attempts")
+    captured: int = Field(description="All stored frames, including rejected ones; maximum 300 per session")
     failed_attempts: int
     resolution_w: int | None
     resolution_h: int | None
@@ -68,7 +68,7 @@ class CaptureImageResponse(BaseModel):
     quality_status: str = "unassessed"
     rejection_reason: str | None = None
     sharpness: float | None = None
-    corners: list[list[float]] | None = None
+    corners: list[list[float]] | None = Field(None, description="Detected chessboard corners in original-image pixel coordinates")
     preview_url: str | None = None
 
 

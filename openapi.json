@@ -1,0 +1,5671 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Waste Volume Estimation API",
+    "description": "## Waste Volume Estimation API\n\nCamera operations are mounted at `/api/v1/cameras`; `/files` serves protected artifacts.\n\n- WebRTC playback uses backend-authenticated WHEP signaling; media flows directly from MediaMTX.\n- RTSP calibration capture selects chessboard frames and queues computation. Computed calibrations are inactive until explicitly activated; multipart calibration upload is synchronous and activates its result.\n- Snapshots preserve original resolution and record worker-reception UTC time, not sensor time.\n- Predictions queue `upload`, `rtsp_frame`, or `latest_rtsp` and persist `pending -> processing -> done/failed`. HTTP 202 acknowledges submission, not completion.\n- Grid volume sums cell median heights times cell area. `convex_hull` means 2D footprint-hull area times median height, not a 3D hull. Volume is m³/L, footprint m², height meters; missing estimates remain null. BEV is a visualization, not a complete 3D reconstruction.\n\n### Authentication\nCamera operations and artifact downloads require `X-API-Key`. `/`, `/health`, `/docs`, `/redoc`, and `/openapi.json` are public. Keys are configured through `VALID_API_KEYS` or stored hashed in PostgreSQL. Environment-configured keys have wildcard scopes and must not be embedded in browser builds. Missing headers currently return 422; invalid keys return 401 and insufficient scopes return 403.\n\n### Scopes\n- `camera:read` / `camera:write` - Camera management\n- `calibration:read` / `calibration:write` - Calibration\n- `ground_ref:read` / `ground_ref:write` - Ground references\n- `predict:read` / `predict:write` - Predictions\n\n### Prediction prerequisites and coordinates\nSubmission pins an active calibration, a ground model linked to an active reference for that calibration, and an active depth scale for that ground model. There is no public depth-scale setup/readiness endpoint; provisioning is an operator task. New calibrations preserve `k_original`, `k_undist`, and dimensions; `k_matrix` remains the undistorted K. Upload raw images for these calibrations. Legacy uploads without original intrinsics require already-undistorted images; RTSP requires recalibration. Ground-reference image points use undistorted coordinates.\n\n### RTSP sources and output selection\n`rtsp_frame` captures at worker execution. `latest_rtsp` requires a fresh persisted snapshot at submission and selects again at execution, without fallback capture. RTSP rejects caller files/timestamps; frame dimensions must exactly match calibration. `return_outputs` is a JSON-array form string: omitted registers all supported outputs, `[]` registers none. Internal files may still be generated; summary/instances/volumes are not filtered. Broker failure returns 503 and marks the job failed; predictions are not automatically redispatched.\n\n### Errors and deployment limits\nErrors use `detail` as a string, an object with a safe `code`, or a validation list. Handle all shapes. Browser video/ICE/reconnect, real-camera accuracy, model/GPU inference, TLS/TURN, and dashboard integration still require deployment testing. Legacy ground-reference/model routes do not yet enforce camera-bound API-key restrictions; do not treat them as tenant-isolated.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/files/{path}": {
+      "get": {
+        "summary": "Serve Artefact",
+        "description": "Serve a stored artefact file with API-key authentication.",
+        "operationId": "serve_artefact_files__path__get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Storage key path (e.g. cameras/123/outputs/abc.jpg)",
+              "title": "Path"
+            },
+            "description": "Storage key path (e.g. cameras/123/outputs/abc.jpg)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized artifact bytes; Content-Type depends on the stored file",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Artifact missing or not registered for access"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras": {
+      "post": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "Create Camera",
+        "description": "Register a new camera.",
+        "operationId": "create_camera_api_v1_cameras_post",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CameraCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CameraResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "List Cameras",
+        "description": "List cameras with pagination.",
+        "operationId": "list_cameras_api_v1_cameras_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "active_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Active Only"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CameraListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}": {
+      "get": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "Get Camera",
+        "description": "Get camera details with active calibration info.",
+        "operationId": "get_camera_api_v1_cameras__camera_id__get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CameraWithActiveCalib"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "Update Camera",
+        "description": "Update camera metadata.",
+        "operationId": "update_camera_api_v1_cameras__camera_id__patch",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CameraUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CameraResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "Delete Camera",
+        "description": "Delete camera (cascades to calibrations, jobs, etc.).",
+        "operationId": "delete_camera_api_v1_cameras__camera_id__delete",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/stream": {
+      "get": {
+        "tags": [
+          "streams"
+        ],
+        "summary": "Get Stream",
+        "operationId": "get_stream_api_v1_cameras__camera_id__stream_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "streams"
+        ],
+        "summary": "Update Stream",
+        "operationId": "update_stream_api_v1_cameras__camera_id__stream_patch",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/stream/whep": {
+      "options": {
+        "tags": [
+          "streams"
+        ],
+        "summary": "Whep Options",
+        "operationId": "whep_options_api_v1_cameras__camera_id__stream_whep_options",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Authenticated WHEP capabilities (not a CORS preflight)",
+            "headers": {
+              "Accept-Post": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Link": {
+                "description": "ICE server links when returned by MediaMTX",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "streams"
+        ],
+        "summary": "Whep Offer",
+        "operationId": "whep_offer_api_v1_cameras__camera_id__stream_whep_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "SDP answer and owned backend session Location; do not retry offer POST automatically",
+            "content": {
+              "application/sdp": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "Location": {
+                "description": "Backend URL for authenticated PATCH/DELETE with the same API key",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Link": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/sdp": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/stream/whep/{session_id}": {
+      "patch": {
+        "tags": [
+          "streams"
+        ],
+        "summary": "Whep Patch",
+        "operationId": "whep_patch_api_v1_cameras__camera_id__stream_whep__session_id__patch",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "description": "ETag from the WHEP answer; forwarded when present",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "ICE fragment accepted",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "ICE restart answer",
+            "content": {
+              "application/trickle-ice-sdpfrag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/trickle-ice-sdpfrag": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "streams"
+        ],
+        "summary": "Whep Delete",
+        "operationId": "whep_delete_api_v1_cameras__camera_id__stream_whep__session_id__delete",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/snapshots": {
+      "post": {
+        "tags": [
+          "snapshots"
+        ],
+        "summary": "Create Snapshot",
+        "description": "Synchronously capture and persist one original-resolution RTSP JPEG.\n\nRequires camera:write. No calibration is required for the snapshot itself.\ncaptured_at records worker-reception UTC, not camera sensor time.",
+        "operationId": "create_snapshot_api_v1_cameras__camera_id__snapshots_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Camera not found"
+          },
+          "409": {
+            "description": "Enabled RTSP stream required or camera source changed"
+          },
+          "503": {
+            "description": "Capture, relay synchronization, or storage unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/snapshots/latest": {
+      "get": {
+        "tags": [
+          "snapshots"
+        ],
+        "summary": "Get Latest Snapshot",
+        "description": "Select a fresh persisted snapshot from the current source; never capture a fallback.\n\nRequires camera:read. Explicit snapshot-ID image download remains available\nfor older frames without the latest-selection freshness check.",
+        "operationId": "get_latest_snapshot_api_v1_cameras__camera_id__snapshots_latest_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "max_frame_age_sec",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 300,
+              "minimum": 1,
+              "default": 30,
+              "title": "Max Frame Age Sec"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Camera or persisted snapshot not found"
+          },
+          "409": {
+            "description": "Snapshot stale, source changed, or stream disabled"
+          },
+          "503": {
+            "description": "Stream configuration unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/snapshots/{snapshot_id}/image": {
+      "get": {
+        "tags": [
+          "snapshots"
+        ],
+        "summary": "Download Snapshot",
+        "operationId": "download_snapshot_api_v1_cameras__camera_id__snapshots__snapshot_id__image_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Snapshot Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibrations": {
+      "post": {
+        "tags": [
+          "calibrations"
+        ],
+        "summary": "Create Calibration",
+        "description": "Upload chessboard images and run calibration.\n\nRequires at least 10 valid chessboard images (recommended 15-30).\nImages should be JPG/PNG/BMP format.",
+        "operationId": "create_calibration_api_v1_cameras__camera_id__calibrations_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_create_calibration_api_v1_cameras__camera_id__calibrations_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalibrationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "calibrations"
+        ],
+        "summary": "List Calibrations",
+        "description": "List all calibration versions for a camera.",
+        "operationId": "list_calibrations_api_v1_cameras__camera_id__calibrations_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalibrationListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibrations/active": {
+      "get": {
+        "tags": [
+          "calibrations"
+        ],
+        "summary": "Get Active Calibration",
+        "description": "Get the currently active calibration for a camera.",
+        "operationId": "get_active_calibration_api_v1_cameras__camera_id__calibrations_active_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalibrationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibrations/{calibration_id}": {
+      "get": {
+        "tags": [
+          "calibrations"
+        ],
+        "summary": "Get Calibration",
+        "description": "Get specific calibration version.",
+        "operationId": "get_calibration_api_v1_cameras__camera_id__calibrations__calibration_id__get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "calibration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Calibration Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalibrationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "calibrations"
+        ],
+        "summary": "Delete Calibration",
+        "description": "Delete a calibration version (cannot delete active).",
+        "operationId": "delete_calibration_api_v1_cameras__camera_id__calibrations__calibration_id__delete",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "calibration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Calibration Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibrations/{calibration_id}/activate": {
+      "post": {
+        "tags": [
+          "calibrations"
+        ],
+        "summary": "Activate Calibration",
+        "description": "Set a calibration version as active (deactivates others).",
+        "operationId": "activate_calibration_api_v1_cameras__camera_id__calibrations__calibration_id__activate_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "calibration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Calibration Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalibrationActivateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibrations/{calibration_id}/undistort-preview": {
+      "get": {
+        "tags": [
+          "calibrations"
+        ],
+        "summary": "Get Undistort Preview",
+        "description": "Get undistort preview for a calibration (uses first calibration image).",
+        "operationId": "get_undistort_preview_api_v1_cameras__camera_id__calibrations__calibration_id__undistort_preview_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "calibration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Calibration Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UndistortPreviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibration-captures": {
+      "post": {
+        "tags": [
+          "calibration-captures"
+        ],
+        "summary": "Start Capture",
+        "description": "Start accepted-frame capture without waiting for camera frames.\n\nRequires calibration:write and an enabled stream. HTTP 202 persists a queued\nsession even if broker dispatch fails; the API reconciler retries dispatch.\nPoll the returned session_id. completed means the capture target was reached,\nnot that calibration succeeded. Queue time counts toward the deadline.",
+        "operationId": "start_capture_api_v1_cameras__camera_id__calibration_captures_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Enabled RTSP stream required or a capture is already active"
+          },
+          "503": {
+            "description": "Database or stream configuration unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibration-captures/{session_id}": {
+      "get": {
+        "tags": [
+          "calibration-captures"
+        ],
+        "summary": "Capture Status",
+        "operationId": "capture_status_api_v1_cameras__camera_id__calibration_captures__session_id__get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibration-captures/{session_id}/stop": {
+      "post": {
+        "tags": [
+          "calibration-captures"
+        ],
+        "summary": "Stop Capture",
+        "operationId": "stop_capture_api_v1_cameras__camera_id__calibration_captures__session_id__stop_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibration-captures/{session_id}/images": {
+      "get": {
+        "tags": [
+          "calibration-captures"
+        ],
+        "summary": "Capture Images",
+        "operationId": "capture_images_api_v1_cameras__camera_id__calibration_captures__session_id__images_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureImageList"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibration-captures/{session_id}/images/{image_id}": {
+      "get": {
+        "tags": [
+          "calibration-captures"
+        ],
+        "summary": "Download Capture Image",
+        "operationId": "download_capture_image_api_v1_cameras__camera_id__calibration_captures__session_id__images__image_id__get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "image_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Image Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibration-captures/{session_id}/images/{image_id}/preview": {
+      "get": {
+        "tags": [
+          "calibration-captures"
+        ],
+        "summary": "Preview Capture Image",
+        "operationId": "preview_capture_image_api_v1_cameras__camera_id__calibration_captures__session_id__images__image_id__preview_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "image_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Image Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/calibration-captures/{session_id}/compute": {
+      "post": {
+        "tags": [
+          "calibration-captures"
+        ],
+        "summary": "Compute Capture",
+        "description": "Queue computation for a terminal capture with enough selected views.\n\nRequires calibration:write. queued/running/done requests reuse computation;\nfailed computation can be retried explicitly. Poll compute_status separately\nfrom capture status. A successful result_calibration_id is inactive and must\nbe explicitly activated. Legacy stored frames are quality-assessed first.",
+        "operationId": "compute_capture_api_v1_cameras__camera_id__calibration_captures__session_id__compute_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaptureResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Capture still active or insufficient usable frames (default minimum 10)"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-references": {
+      "post": {
+        "tags": [
+          "ground-references"
+        ],
+        "summary": "Create Ground Reference",
+        "description": "Submit ground reference points (image <-> world correspondences).\n\nThis computes the ground model (homography + camera pose) automatically.",
+        "operationId": "create_ground_reference_api_v1_cameras__camera_id__ground_references_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_create_ground_reference_api_v1_cameras__camera_id__ground_references_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundReferenceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "ground-references"
+        ],
+        "summary": "List Ground References",
+        "description": "List all ground reference versions for a camera.",
+        "operationId": "list_ground_references_api_v1_cameras__camera_id__ground_references_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundReferenceListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-references/active": {
+      "get": {
+        "tags": [
+          "ground-references"
+        ],
+        "summary": "Get Active Ground Reference",
+        "description": "Get the currently active ground reference for a camera.",
+        "operationId": "get_active_ground_reference_api_v1_cameras__camera_id__ground_references_active_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundReferenceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-references/{ground_ref_id}": {
+      "get": {
+        "tags": [
+          "ground-references"
+        ],
+        "summary": "Get Ground Reference",
+        "description": "Get specific ground reference version.",
+        "operationId": "get_ground_reference_api_v1_cameras__camera_id__ground_references__ground_ref_id__get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_ref_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Ref Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundReferenceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-references/{ground_ref_id}/activate": {
+      "post": {
+        "tags": [
+          "ground-references"
+        ],
+        "summary": "Activate Ground Reference",
+        "description": "Set a ground reference version as active (deactivates others).",
+        "operationId": "activate_ground_reference_api_v1_cameras__camera_id__ground_references__ground_ref_id__activate_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_ref_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Ref Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundReferenceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-models/active": {
+      "get": {
+        "tags": [
+          "ground-models"
+        ],
+        "summary": "Get Active Ground Model",
+        "description": "Get the ground model associated with active ground reference.",
+        "operationId": "get_active_ground_model_api_v1_cameras__camera_id__ground_models_active_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundModelResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}": {
+      "get": {
+        "tags": [
+          "ground-models"
+        ],
+        "summary": "Get Ground Model",
+        "description": "Get specific ground model.",
+        "operationId": "get_ground_model_api_v1_cameras__camera_id__ground_models__ground_model_id__get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundModelResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/bev-preview": {
+      "get": {
+        "tags": [
+          "ground-models"
+        ],
+        "summary": "Get Bev Preview",
+        "description": "Generate BEV preview for a ground model.",
+        "operationId": "get_bev_preview_api_v1_cameras__camera_id__ground_models__ground_model_id__bev_preview_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          },
+          {
+            "name": "test_image_path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Path to test image (optional)",
+              "title": "Test Image Path"
+            },
+            "description": "Path to test image (optional)"
+          },
+          {
+            "name": "mask_path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Path to mask image (optional)",
+              "title": "Mask Path"
+            },
+            "description": "Path to mask image (optional)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BEVPreviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/predict": {
+      "post": {
+        "tags": [
+          "predictions"
+        ],
+        "summary": "Submit Prediction",
+        "description": "Queue upload, worker-time RTSP capture, or a freshness-bounded persisted snapshot.\n\nHTTP 202 returns job_id, not a prediction result. Poll GET /predict/{job_id}\nuntil done/failed. Calibration, ground reference/model, and depth scale must\nbelong to compatible active versions. estimated_duration_sec is a fixed\nadvisory value, not measured progress or a completion deadline.",
+        "operationId": "submit_prediction_api_v1_cameras__camera_id__predict_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_submit_prediction_api_v1_cameras__camera_id__predict_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PredictionJobSubmitResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Upload file required or image invalid"
+          },
+          "409": {
+            "description": "Compatible calibration/ground/depth prerequisite missing, stream disabled, or snapshot missing/stale"
+          },
+          "413": {
+            "description": "Upload byte/pixel limit exceeded"
+          },
+          "503": {
+            "description": "Storage/database submission failed or queue unavailable; do not assume a processing job exists"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "predictions"
+        ],
+        "summary": "List Prediction Jobs",
+        "description": "List prediction jobs for a camera.",
+        "operationId": "list_prediction_jobs_api_v1_cameras__camera_id__predict_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PredictionJobListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/predict/{job_id}": {
+      "get": {
+        "tags": [
+          "predictions"
+        ],
+        "summary": "Get Prediction Job",
+        "description": "Get prediction job status and result.",
+        "operationId": "get_prediction_job_api_v1_cameras__camera_id__predict__job_id__get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PredictionJobResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/predict/{job_id}/outputs": {
+      "get": {
+        "tags": [
+          "predictions"
+        ],
+        "summary": "Get Prediction Outputs",
+        "description": "List all output files for a prediction job.",
+        "operationId": "get_prediction_outputs_api_v1_cameras__camera_id__predict__job_id__outputs_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PredictionOutputsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/predict/{job_id}/outputs/{output_type}": {
+      "get": {
+        "tags": [
+          "predictions"
+        ],
+        "summary": "Download Prediction Output",
+        "description": "Download a specific output file.",
+        "operationId": "download_prediction_output_api_v1_cameras__camera_id__predict__job_id__outputs__output_type__get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          },
+          {
+            "name": "output_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Output Type"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registered output bytes, selected by return_outputs",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job/output not found, output not selected, or file missing"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/predict/{job_id}/instances": {
+      "get": {
+        "tags": [
+          "predictions"
+        ],
+        "summary": "Get Prediction Instances",
+        "description": "Get detected instances for a prediction job.",
+        "operationId": "get_prediction_instances_api_v1_cameras__camera_id__predict__job_id__instances_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DetectedInstanceResponse"
+                  },
+                  "title": "Response Get Prediction Instances Api V1 Cameras  Camera Id  Predict  Job Id  Instances Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/predict/{job_id}/volumes": {
+      "get": {
+        "tags": [
+          "predictions"
+        ],
+        "summary": "Get Prediction Volumes",
+        "description": "Get volume estimates for a prediction job.",
+        "operationId": "get_prediction_volumes_api_v1_cameras__camera_id__predict__job_id__volumes_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VolumeEstimateResponse"
+                  },
+                  "title": "Response Get Prediction Volumes Api V1 Cameras  Camera Id  Predict  Job Id  Volumes Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health Check",
+        "description": "Health check endpoint.\n\nProbes the database connection honestly instead of reporting connected\nunconditionally. Never exposes internal error details to the client.",
+        "operationId": "health_check_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/": {
+      "get": {
+        "summary": "Root",
+        "description": "Root endpoint.",
+        "operationId": "root__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RootResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BEVPreviewResponse": {
+        "properties": {
+          "bev_image_url": {
+            "type": "string",
+            "title": "Bev Image Url"
+          },
+          "bev_mask_url": {
+            "type": "string",
+            "title": "Bev Mask Url"
+          },
+          "bev_overlay_url": {
+            "type": "string",
+            "title": "Bev Overlay Url"
+          },
+          "bev_info": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Bev Info"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bev_image_url",
+          "bev_mask_url",
+          "bev_overlay_url",
+          "bev_info"
+        ],
+        "title": "BEVPreviewResponse"
+      },
+      "Body_create_calibration_api_v1_cameras__camera_id__calibrations_post": {
+        "properties": {
+          "chessboard_cols": {
+            "type": "integer",
+            "maximum": 30.0,
+            "minimum": 3.0,
+            "title": "Chessboard Cols",
+            "default": 9
+          },
+          "chessboard_rows": {
+            "type": "integer",
+            "maximum": 30.0,
+            "minimum": 3.0,
+            "title": "Chessboard Rows",
+            "default": 6
+          },
+          "square_m": {
+            "type": "number",
+            "maximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Square M",
+            "default": 0.025
+          },
+          "alpha": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Alpha",
+            "default": 0.0
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "files": {
+            "items": {
+              "type": "string",
+              "contentMediaType": "application/octet-stream"
+            },
+            "type": "array",
+            "title": "Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "files"
+        ],
+        "title": "Body_create_calibration_api_v1_cameras__camera_id__calibrations_post"
+      },
+      "Body_create_ground_reference_api_v1_cameras__camera_id__ground_references_post": {
+        "properties": {
+          "image_points": {
+            "type": "string",
+            "title": "Image Points"
+          },
+          "world_points": {
+            "type": "string",
+            "title": "World Points"
+          },
+          "world_units": {
+            "type": "string",
+            "title": "World Units",
+            "default": "meter"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_points",
+          "world_points"
+        ],
+        "title": "Body_create_ground_reference_api_v1_cameras__camera_id__ground_references_post"
+      },
+      "Body_submit_prediction_api_v1_cameras__camera_id__predict_post": {
+        "properties": {
+          "source_type": {
+            "type": "string",
+            "pattern": "^(upload|rtsp_frame|latest_rtsp)$",
+            "title": "Source Type",
+            "description": "upload: image file; rtsp_frame: fresh capture at worker execution; latest_rtsp: latest persisted snapshot at execution"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp",
+            "description": "Caller timestamp for upload only; forbidden for RTSP sources"
+          },
+          "seg_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seg Model"
+          },
+          "seg_conf": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Seg Conf",
+            "default": 0.25
+          },
+          "seg_classes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seg Classes",
+            "description": "JSON array of segmentation class names"
+          },
+          "volume_cell_m": {
+            "type": "number",
+            "maximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Volume Cell M",
+            "default": 0.05
+          },
+          "volume_min_pts_per_cell": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Volume Min Pts Per Cell",
+            "default": 2
+          },
+          "max_frame_age_sec": {
+            "type": "integer",
+            "maximum": 300.0,
+            "minimum": 1.0,
+            "title": "Max Frame Age Sec",
+            "description": "Maximum RTSP snapshot age in seconds, checked again by the worker",
+            "default": 30
+          },
+          "return_outputs": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return Outputs",
+            "description": "JSON array of output types: omitted registers all, [] registers none. Valid types: bev_image, bev_mask_proyeksi, bev_overlay, depth_masked, depth_raw_vis, depth_scaled_vis, height_map, instances_json, lifted_points_npz, mask, overlay, volume_heatmap, volume_result_npz. Internal artifacts may still be generated"
+          },
+          "file": {
+            "anyOf": [
+              {
+                "type": "string",
+                "contentMediaType": "application/octet-stream"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File",
+            "description": "Required for upload, forbidden for RTSP. Raw image at calibration dimensions with explicit intrinsics; legacy calibrations require already-undistorted input"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_type"
+        ],
+        "title": "Body_submit_prediction_api_v1_cameras__camera_id__predict_post"
+      },
+      "CalibrationActivateResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "camera_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Camera Id"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "camera_id",
+          "version",
+          "is_active",
+          "message"
+        ],
+        "title": "CalibrationActivateResponse"
+      },
+      "CalibrationListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CalibrationResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "CalibrationListResponse"
+      },
+      "CalibrationResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "camera_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Camera Id"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "k_matrix": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "K Matrix",
+            "description": "Undistorted camera intrinsics; legacy field retains this meaning"
+          },
+          "k_original": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K Original",
+            "description": "Original raw-image intrinsics; null for legacy calibrations, never reconstructed by migration"
+          },
+          "k_undist": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K Undist",
+            "description": "Explicit target intrinsics for undistortion, equivalent to k_matrix for new calibrations"
+          },
+          "resolution_w": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution W",
+            "description": "Calibration image width in pixels"
+          },
+          "resolution_h": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution H",
+            "description": "Calibration image height in pixels"
+          },
+          "alpha": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha"
+          },
+          "per_view_errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Per View Errors",
+            "description": "Per-view reprojection RMS errors in pixels"
+          },
+          "dist_coeffs": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Dist Coeffs"
+          },
+          "rms_reproj": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rms Reproj",
+            "description": "Overall reprojection RMS error in pixels"
+          },
+          "coverage_w": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage W",
+            "description": "Horizontal chessboard coverage in percent"
+          },
+          "coverage_h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage H",
+            "description": "Vertical chessboard coverage in percent"
+          },
+          "chessboard_cols": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chessboard Cols"
+          },
+          "chessboard_rows": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chessboard Rows"
+          },
+          "square_m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Square M"
+          },
+          "calib_images": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calib Images"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "camera_id",
+          "version",
+          "k_matrix",
+          "dist_coeffs",
+          "rms_reproj",
+          "coverage_w",
+          "coverage_h",
+          "chessboard_cols",
+          "chessboard_rows",
+          "square_m",
+          "calib_images",
+          "notes",
+          "is_active",
+          "created_at"
+        ],
+        "title": "CalibrationResponse"
+      },
+      "CameraCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "rtsp_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtsp Url"
+          },
+          "latitude": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 90.0,
+                "minimum": -90.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latitude"
+          },
+          "longitude": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 180.0,
+                "minimum": -180.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Longitude"
+          },
+          "resolution_w": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Resolution W"
+          },
+          "resolution_h": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Resolution H"
+          },
+          "fps": {
+            "type": "integer",
+            "maximum": 120.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Fps",
+            "default": 25
+          },
+          "roi_polygon": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roi Polygon"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "resolution_w",
+          "resolution_h"
+        ],
+        "title": "CameraCreate"
+      },
+      "CameraListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CameraResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "title": "Page Size"
+          },
+          "total_pages": {
+            "type": "integer",
+            "title": "Total Pages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size",
+          "total_pages"
+        ],
+        "title": "CameraListResponse"
+      },
+      "CameraResponse": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "rtsp_url": {
+            "type": "null",
+            "title": "Rtsp Url",
+            "description": "Never returned; submit source URLs only on writes.",
+            "deprecated": true
+          },
+          "latitude": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 90.0,
+                "minimum": -90.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latitude"
+          },
+          "longitude": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 180.0,
+                "minimum": -180.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Longitude"
+          },
+          "resolution_w": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Resolution W"
+          },
+          "resolution_h": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Resolution H"
+          },
+          "fps": {
+            "type": "integer",
+            "maximum": 120.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Fps",
+            "default": 25
+          },
+          "roi_polygon": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roi Polygon"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "rtsp_configured": {
+            "type": "boolean",
+            "title": "Rtsp Configured",
+            "default": false
+          },
+          "stream_enabled": {
+            "type": "boolean",
+            "title": "Stream Enabled",
+            "default": false
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "resolution_w",
+          "resolution_h",
+          "id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CameraResponse"
+      },
+      "CameraUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "rtsp_url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rtsp Url"
+          },
+          "latitude": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 90.0,
+                "minimum": -90.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latitude"
+          },
+          "longitude": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 180.0,
+                "minimum": -180.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Longitude"
+          },
+          "resolution_w": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 10000.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution W"
+          },
+          "resolution_h": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 10000.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution H"
+          },
+          "fps": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 120.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fps"
+          },
+          "roi_polygon": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roi Polygon"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          }
+        },
+        "type": "object",
+        "title": "CameraUpdate"
+      },
+      "CameraWithActiveCalib": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "rtsp_url": {
+            "type": "null",
+            "title": "Rtsp Url",
+            "description": "Never returned; submit source URLs only on writes.",
+            "deprecated": true
+          },
+          "latitude": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 90.0,
+                "minimum": -90.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latitude"
+          },
+          "longitude": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 180.0,
+                "minimum": -180.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Longitude"
+          },
+          "resolution_w": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Resolution W"
+          },
+          "resolution_h": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Resolution H"
+          },
+          "fps": {
+            "type": "integer",
+            "maximum": 120.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Fps",
+            "default": 25
+          },
+          "roi_polygon": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roi Polygon"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          },
+          "rtsp_configured": {
+            "type": "boolean",
+            "title": "Rtsp Configured",
+            "default": false
+          },
+          "stream_enabled": {
+            "type": "boolean",
+            "title": "Stream Enabled",
+            "default": false
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "active_calibration_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Calibration Id"
+          },
+          "active_calibration_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Calibration Version"
+          },
+          "active_calibration_rms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Calibration Rms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "resolution_w",
+          "resolution_h",
+          "id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CameraWithActiveCalib"
+      },
+      "CaptureCreate": {
+        "properties": {
+          "chessboard_cols": {
+            "type": "integer",
+            "maximum": 30.0,
+            "minimum": 3.0,
+            "title": "Chessboard Cols",
+            "default": 9
+          },
+          "chessboard_rows": {
+            "type": "integer",
+            "maximum": 30.0,
+            "minimum": 3.0,
+            "title": "Chessboard Rows",
+            "default": 6
+          },
+          "square_m": {
+            "type": "number",
+            "maximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Square M",
+            "description": "Chessboard square side in meters",
+            "default": 0.025
+          },
+          "interval_sec": {
+            "type": "number",
+            "maximum": 60.0,
+            "minimum": 1.0,
+            "title": "Interval Sec",
+            "default": 2
+          },
+          "target_images": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Target Images",
+            "description": "Accepted chessboard frames for new sessions",
+            "default": 20
+          },
+          "max_duration_sec": {
+            "type": "integer",
+            "maximum": 900.0,
+            "minimum": 1.0,
+            "title": "Max Duration Sec",
+            "description": "Wall-clock limit from session creation, including queue time",
+            "default": 300
+          },
+          "auto_calibrate": {
+            "type": "boolean",
+            "title": "Auto Calibrate",
+            "description": "Queue inactive calibration computation after completed/stopped/expired capture; insufficient accepted frames fail computation",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "CaptureCreate"
+      },
+      "CaptureImageList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CaptureImageResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "CaptureImageList"
+      },
+      "CaptureImageResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "sequence": {
+            "type": "integer",
+            "title": "Sequence"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "title": "Size Bytes"
+          },
+          "captured_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Captured At"
+          },
+          "download_url": {
+            "type": "string",
+            "title": "Download Url"
+          },
+          "quality_status": {
+            "type": "string",
+            "title": "Quality Status",
+            "default": "unassessed"
+          },
+          "rejection_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejection Reason"
+          },
+          "sharpness": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sharpness"
+          },
+          "corners": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Corners",
+            "description": "Detected chessboard corners in original-image pixel coordinates"
+          },
+          "preview_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "sequence",
+          "width",
+          "height",
+          "size_bytes",
+          "captured_at",
+          "download_url"
+        ],
+        "title": "CaptureImageResponse"
+      },
+      "CaptureResponse": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Session Id"
+          },
+          "camera_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Camera Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "stopping",
+              "completed",
+              "stopped",
+              "expired",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "chessboard_cols": {
+            "type": "integer",
+            "title": "Chessboard Cols"
+          },
+          "chessboard_rows": {
+            "type": "integer",
+            "title": "Chessboard Rows"
+          },
+          "square_m": {
+            "type": "number",
+            "title": "Square M"
+          },
+          "interval_sec": {
+            "type": "number",
+            "title": "Interval Sec"
+          },
+          "target_images": {
+            "type": "integer",
+            "title": "Target Images"
+          },
+          "max_duration_sec": {
+            "type": "integer",
+            "title": "Max Duration Sec"
+          },
+          "auto_calibrate": {
+            "type": "boolean",
+            "title": "Auto Calibrate",
+            "default": false
+          },
+          "selection_version": {
+            "type": "integer",
+            "title": "Selection Version",
+            "description": "1 targets accepted frames; legacy 0 targets stored frames, then quality-assesses them at computation",
+            "default": 0
+          },
+          "accepted": {
+            "type": "integer",
+            "title": "Accepted",
+            "description": "Frames accepted by chessboard, sharpness, and pose selection",
+            "default": 0
+          },
+          "rejected": {
+            "type": "integer",
+            "title": "Rejected",
+            "description": "Stored frames rejected by quality selection",
+            "default": 0
+          },
+          "rejection_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Rejection Counts"
+          },
+          "compute_status": {
+            "type": "string",
+            "title": "Compute Status",
+            "description": "Independent computation state: none, queued, running, done, failed",
+            "default": "none"
+          },
+          "compute_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compute Error Code"
+          },
+          "compute_requested_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compute Requested At"
+          },
+          "compute_started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compute Started At"
+          },
+          "compute_completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compute Completed At"
+          },
+          "result_calibration_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Calibration Id",
+            "description": "Inactive calibration UUID after compute succeeds; explicitly activate it via calibrations endpoint"
+          },
+          "attempted": {
+            "type": "integer",
+            "title": "Attempted",
+            "description": "Attempts started; interrupted attempts need not equal captured + failed_attempts"
+          },
+          "captured": {
+            "type": "integer",
+            "title": "Captured",
+            "description": "All stored frames, including rejected ones; maximum 300 per session"
+          },
+          "failed_attempts": {
+            "type": "integer",
+            "title": "Failed Attempts"
+          },
+          "resolution_w": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution W"
+          },
+          "resolution_h": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution H"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "finish_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finish Reason"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "deadline_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Deadline At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "heartbeat_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Heartbeat At"
+          },
+          "last_capture_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Capture At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "camera_id",
+          "status",
+          "chessboard_cols",
+          "chessboard_rows",
+          "square_m",
+          "interval_sec",
+          "target_images",
+          "max_duration_sec",
+          "attempted",
+          "captured",
+          "failed_attempts",
+          "resolution_w",
+          "resolution_h",
+          "error_code",
+          "finish_reason",
+          "created_at",
+          "deadline_at",
+          "started_at",
+          "completed_at",
+          "heartbeat_at",
+          "last_capture_at"
+        ],
+        "title": "CaptureResponse"
+      },
+      "DetectedInstanceResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "job_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Job Id"
+          },
+          "cls_name": {
+            "type": "string",
+            "title": "Cls Name"
+          },
+          "confidence": {
+            "type": "number",
+            "title": "Confidence"
+          },
+          "polygon_px": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "Polygon Px"
+          },
+          "polygon_world": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Polygon World"
+          },
+          "volume_m3": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume M3"
+          },
+          "footprint_m2": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Footprint M2"
+          },
+          "height_mean_m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height Mean M"
+          },
+          "height_max_m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height Max M"
+          },
+          "n_pixels": {
+            "type": "integer",
+            "title": "N Pixels"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "job_id",
+          "cls_name",
+          "confidence",
+          "polygon_px",
+          "polygon_world",
+          "volume_m3",
+          "footprint_m2",
+          "height_mean_m",
+          "height_max_m",
+          "n_pixels",
+          "created_at"
+        ],
+        "title": "DetectedInstanceResponse"
+      },
+      "GroundModelResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "camera_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Camera Id"
+          },
+          "calibration_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Calibration Id"
+          },
+          "ground_ref_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Ground Ref Id"
+          },
+          "R_matrix": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "R Matrix"
+          },
+          "t_vector": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "T Vector"
+          },
+          "H_i2w": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "H I2W"
+          },
+          "H_w2i": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "H W2I"
+          },
+          "cam_height": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cam Height"
+          },
+          "pitch_down_deg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pitch Down Deg"
+          },
+          "reproj_err_px": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reproj Err Px"
+          },
+          "bev_ppm": {
+            "type": "integer",
+            "title": "Bev Ppm"
+          },
+          "bev_margin_m": {
+            "type": "number",
+            "title": "Bev Margin M"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "camera_id",
+          "calibration_id",
+          "ground_ref_id",
+          "R_matrix",
+          "t_vector",
+          "H_i2w",
+          "H_w2i",
+          "cam_height",
+          "pitch_down_deg",
+          "reproj_err_px",
+          "bev_ppm",
+          "bev_margin_m",
+          "created_at"
+        ],
+        "title": "GroundModelResponse"
+      },
+      "GroundReferenceListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/GroundReferenceResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "GroundReferenceListResponse"
+      },
+      "GroundReferenceResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "camera_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Camera Id"
+          },
+          "calibration_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Calibration Id"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "image_points": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "Image Points"
+          },
+          "world_points": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "World Points"
+          },
+          "world_units": {
+            "type": "string",
+            "title": "World Units"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "camera_id",
+          "calibration_id",
+          "version",
+          "image_points",
+          "world_points",
+          "world_units",
+          "description",
+          "is_active",
+          "created_at"
+        ],
+        "title": "GroundReferenceResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded"
+            ],
+            "title": "Status"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "database": {
+            "type": "string",
+            "enum": [
+              "connected",
+              "disconnected"
+            ],
+            "title": "Database"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "version",
+          "database"
+        ],
+        "title": "HealthResponse"
+      },
+      "PredictionJobListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PredictionJobResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "title": "Page Size"
+          },
+          "total_pages": {
+            "type": "integer",
+            "title": "Total Pages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size",
+          "total_pages"
+        ],
+        "title": "PredictionJobListResponse"
+      },
+      "PredictionJobResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "camera_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Camera Id"
+          },
+          "calibration_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Calibration Id"
+          },
+          "ground_model_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Ground Model Id"
+          },
+          "depth_scale_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Depth Scale Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "source_type": {
+            "type": "string",
+            "title": "Source Type"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path",
+            "description": "Private-storage key, not a public URL or filesystem path"
+          },
+          "source_ts": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Ts",
+            "description": "Upload caller timestamp or RTSP worker-reception UTC time; not sensor time"
+          },
+          "max_frame_age_sec": {
+            "type": "integer",
+            "title": "Max Frame Age Sec",
+            "default": 30
+          },
+          "volume_cell_m": {
+            "type": "number",
+            "title": "Volume Cell M",
+            "default": 0.05
+          },
+          "volume_min_pts_per_cell": {
+            "type": "integer",
+            "title": "Volume Min Pts Per Cell",
+            "default": 2
+          },
+          "seg_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seg Model"
+          },
+          "seg_conf": {
+            "type": "number",
+            "title": "Seg Conf"
+          },
+          "seg_classes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seg Classes"
+          },
+          "return_outputs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return Outputs"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "error_msg": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Msg"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "camera_id",
+          "calibration_id",
+          "ground_model_id",
+          "depth_scale_id",
+          "status",
+          "source_type",
+          "source_path",
+          "source_ts",
+          "seg_model",
+          "seg_conf",
+          "seg_classes",
+          "result",
+          "error_msg",
+          "started_at",
+          "completed_at",
+          "created_at"
+        ],
+        "title": "PredictionJobResponse"
+      },
+      "PredictionJobSubmitResponse": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Job Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "estimated_duration_sec": {
+            "type": "integer",
+            "title": "Estimated Duration Sec",
+            "description": "Fixed advisory estimate, not measured progress or an SLA",
+            "default": 30
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "status",
+          "message"
+        ],
+        "title": "PredictionJobSubmitResponse"
+      },
+      "PredictionOutputResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "job_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Job Id"
+          },
+          "output_type": {
+            "type": "string",
+            "title": "Output Type"
+          },
+          "file_path": {
+            "type": "string",
+            "title": "File Path",
+            "description": "Storage key, not a public URL; download through the authenticated job output endpoint"
+          },
+          "mime_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mime Type"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Width"
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
+          },
+          "meta": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meta"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "job_id",
+          "output_type",
+          "file_path",
+          "mime_type",
+          "width",
+          "height",
+          "meta",
+          "created_at"
+        ],
+        "title": "PredictionOutputResponse"
+      },
+      "PredictionOutputsResponse": {
+        "properties": {
+          "outputs": {
+            "items": {
+              "$ref": "#/components/schemas/PredictionOutputResponse"
+            },
+            "type": "array",
+            "title": "Outputs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "outputs"
+        ],
+        "title": "PredictionOutputsResponse"
+      },
+      "RootResponse": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "docs": {
+            "type": "string",
+            "title": "Docs"
+          },
+          "health": {
+            "type": "string",
+            "title": "Health"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "docs",
+          "health"
+        ],
+        "title": "RootResponse"
+      },
+      "SnapshotResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "camera_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Camera Id"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "title": "Size Bytes"
+          },
+          "captured_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Captured At",
+            "description": "UTC worker-reception time, not the camera sensor timestamp"
+          },
+          "image_url": {
+            "type": "string",
+            "title": "Image Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "camera_id",
+          "width",
+          "height",
+          "size_bytes",
+          "captured_at",
+          "image_url"
+        ],
+        "title": "SnapshotResponse"
+      },
+      "StreamResponse": {
+        "properties": {
+          "camera_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Camera Id"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "idle",
+              "online",
+              "offline",
+              "unknown"
+            ],
+            "title": "Status"
+          },
+          "synced": {
+            "type": "boolean",
+            "title": "Synced"
+          },
+          "whep_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Whep Url"
+          },
+          "tracks": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tracks"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Checked At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "camera_id",
+          "enabled",
+          "status",
+          "synced",
+          "checked_at"
+        ],
+        "title": "StreamResponse"
+      },
+      "StreamUpdate": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "title": "StreamUpdate"
+      },
+      "UndistortPreviewResponse": {
+        "properties": {
+          "preview_url": {
+            "type": "string",
+            "title": "Preview Url"
+          },
+          "original_size": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Original Size"
+          },
+          "undistorted_size": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Undistorted Size"
+          },
+          "k_undist": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "K Undist"
+          }
+        },
+        "type": "object",
+        "required": [
+          "preview_url",
+          "original_size",
+          "undistorted_size",
+          "k_undist"
+        ],
+        "title": "UndistortPreviewResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "VolumeEstimateResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "job_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Job Id"
+          },
+          "method": {
+            "type": "string",
+            "title": "Method"
+          },
+          "volume_m3": {
+            "type": "number",
+            "title": "Volume M3"
+          },
+          "volume_liter": {
+            "type": "number",
+            "title": "Volume Liter"
+          },
+          "footprint_m2": {
+            "type": "number",
+            "title": "Footprint M2"
+          },
+          "cell_m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cell M"
+          },
+          "height_mean_m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height Mean M"
+          },
+          "height_median_m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height Median M"
+          },
+          "n_cells": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Cells"
+          },
+          "n_points": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "N Points"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "job_id",
+          "method",
+          "volume_m3",
+          "volume_liter",
+          "footprint_m2",
+          "cell_m",
+          "height_mean_m",
+          "height_median_m",
+          "n_cells",
+          "n_points",
+          "created_at"
+        ],
+        "title": "VolumeEstimateResponse"
+      }
+    },
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "Configured environment key or active hashed database key. Required scopes depend on the operation. Never put the key in a URL."
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "cameras",
+      "description": "Camera registry and management"
+    },
+    {
+      "name": "streams",
+      "description": "Camera stream state and authenticated WebRTC/WHEP signaling"
+    },
+    {
+      "name": "calibrations",
+      "description": "calibration:read/write. Synchronous multipart upload auto-activates; capture results require explicit activation. k_matrix is undistorted K."
+    },
+    {
+      "name": "calibration-captures",
+      "description": "calibration:read/write, camera-bound keys. PostgreSQL owns capture and computation progress; accepted-frame target, 300 stored frames maximum."
+    },
+    {
+      "name": "snapshots",
+      "description": "camera:write for synchronous capture, camera:read for latest/image. Original-resolution RTSP snapshots; reception timestamps, default freshness 30 seconds."
+    },
+    {
+      "name": "ground-references",
+      "description": "Ground plane reference points and homography"
+    },
+    {
+      "name": "ground-models",
+      "description": "Computed ground models and BEV preview"
+    },
+    {
+      "name": "predictions",
+      "description": "predict:write for queued submission; predict:read for status/history/outputs/instances/volumes. Compatible active calibration, ground reference/model, and depth scale required."
+    }
+  ]
+}

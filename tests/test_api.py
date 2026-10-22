@@ -1,13 +1,14 @@
 """API tests: auth, scope, OpenAPI schema (no real database needed)."""
 import asyncio
 from typing import AsyncGenerator
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, status
 from fastapi.testclient import TestClient
 
 from api.core.security import verify_api_key, require_scope, hash_key
+from api.core.database import get_db
 from api.main import app
 
 
@@ -54,12 +55,20 @@ class TestOpenAPI:
         assert "securitySchemes" in schema["components"]
         assert "ApiKeyAuth" in schema["components"]["securitySchemes"]
 
-    def test_health_endpoint(self):
-        client = TestClient(app)
-        # Health endpoint requires DB; without DB it returns degraded or 500.
-        # We just check the route is registered.
-        response = client.get("/health")
-        assert response.status_code in (200, 500)
+    @pytest.mark.parametrize("connected", [True, False])
+    def test_health_endpoint(self, connected):
+        db = MagicMock(execute=AsyncMock(side_effect=None if connected else RuntimeError("private diagnostics")))
+        async def dependency():
+            yield db
+        app.dependency_overrides[get_db] = dependency
+        try:
+            response = TestClient(app).get("/health")
+            assert response.status_code == 200
+            assert response.json()["status"] == ("healthy" if connected else "degraded")
+            assert response.json()["database"] == ("connected" if connected else "disconnected")
+            assert "private" not in response.text
+        finally:
+            app.dependency_overrides.clear()
 
     def test_root_endpoint(self):
         client = TestClient(app)
@@ -71,7 +80,38 @@ class TestOpenAPI:
 
     def test_predict_route_registered(self):
         client = TestClient(app)
-        # POST without auth should return 422 (missing header) or 401/403
-        response = client.post("/cameras/00000000-0000-0000-0000-000000000000/predict",
-                               data={"source_type": "upload"})
-        assert response.status_code in (401, 403, 422, 404)
+        response = client.post("/api/v1/cameras/00000000-0000-0000-0000-000000000000/predict",
+                                data={"source_type": "upload"})
+        assert response.status_code == 422
+
+    def test_public_and_protected_security_matches_dependencies(self):
+        schema = TestClient(app).get("/openapi.json").json()
+        for path, operations in schema["paths"].items():
+            for operation in operations.values():
+                if not isinstance(operation, dict) or "operationId" not in operation:
+                    continue
+                assert operation["security"] == ([] if path in {"/", "/health"} else [{"ApiKeyAuth": []}])
+                assert not any(parameter.get("in") == "header" and parameter["name"].lower() == "x-api-key"
+                               for parameter in operation.get("parameters", []))
+                if path not in {"/", "/health"}:
+                    assert {"401", "403"} <= set(operation["responses"])
+
+    def test_downloads_are_documented_as_binary_not_json_objects(self):
+        schema = TestClient(app).get("/openapi.json").json()
+        for path in ("/files/{path}", "/api/v1/cameras/{camera_id}/predict/{job_id}/outputs/{output_type}"):
+            content = schema["paths"][path]["get"]["responses"]["200"]["content"]
+            assert set(content) == {"image/jpeg", "image/png", "application/json", "application/octet-stream"}
+            assert all(media["schema"] == {"type": "string", "format": "binary"} for media in content.values())
+        base = "/api/v1/cameras/{camera_id}"
+        for path in (base + "/snapshots/{snapshot_id}/image",
+                     base + "/calibration-captures/{session_id}/images/{image_id}",
+                     base + "/calibration-captures/{session_id}/images/{image_id}/preview"):
+            content = schema["paths"][path]["get"]["responses"]["200"]["content"]
+            assert content == {"image/jpeg": {"schema": {"type": "string", "format": "binary"}}}
+
+    def test_health_and_root_response_schemas(self):
+        schema = TestClient(app).get("/openapi.json").json()
+        health = schema["components"]["schemas"]["HealthResponse"]["properties"]
+        assert set(health["status"]["enum"]) == {"healthy", "degraded"}
+        assert set(health["database"]["enum"]) == {"connected", "disconnected"}
+        assert schema["paths"]["/"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith("/RootResponse")

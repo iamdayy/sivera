@@ -116,6 +116,9 @@ def test_openapi_prediction_multipart_and_snapshot_contract(setup):
     assert "202" in path["responses"]
     assert "201" in schema["paths"]["/api/v1/cameras/{camera_id}/snapshots"]["post"]["responses"]
     assert {"source_type", "file", "timestamp", "seg_classes", "return_outputs"}.issubset(fields)
+    for field in ("seg_classes", "return_outputs"):
+        assert {"type": "string"} in fields[field]["anyOf"]
+    assert fields["file"]["anyOf"][0] == {"type": "string", "contentMediaType": "application/octet-stream"}
     assert path["security"] == [{"ApiKeyAuth": []}]
     image = schema["paths"]["/api/v1/cameras/{camera_id}/snapshots/{snapshot_id}/image"]["get"]
     assert set(image["responses"]["200"]["content"]) == {"image/jpeg"}

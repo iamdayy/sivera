@@ -34,8 +34,17 @@ def response(snapshot: CameraSnapshot, request: Request) -> SnapshotResponse:
     )
 
 
-@router.post("", response_model=SnapshotResponse, status_code=201)
+@router.post("", response_model=SnapshotResponse, status_code=201, responses={
+    404: {"description": "Camera not found"},
+    409: {"description": "Enabled RTSP stream required or camera source changed"},
+    503: {"description": "Capture, relay synchronization, or storage unavailable"},
+})
 async def create_snapshot(camera_id: UUID, request: Request, api_key: ApiKey = Depends(require_scope("camera:write"))) -> SnapshotResponse:
+    """Synchronously capture and persist one original-resolution RTSP JPEG.
+
+    Requires camera:write. No calibration is required for the snapshot itself.
+    captured_at records worker-reception UTC, not camera sensor time.
+    """
     check_camera_access(api_key, camera_id)
     try:
         snapshot = await capture_snapshot(camera_id, get_db_context, get_storage())
@@ -46,11 +55,20 @@ async def create_snapshot(camera_id: UUID, request: Request, api_key: ApiKey = D
     return response(snapshot, request)
 
 
-@router.get("/latest", response_model=SnapshotResponse)
+@router.get("/latest", response_model=SnapshotResponse, responses={
+    404: {"description": "Camera or persisted snapshot not found"},
+    409: {"description": "Snapshot stale, source changed, or stream disabled"},
+    503: {"description": "Stream configuration unavailable"},
+})
 async def get_latest_snapshot(
     camera_id: UUID, request: Request, max_frame_age_sec: int = Query(30, ge=1, le=300),
     db: AsyncSession = Depends(get_db), api_key: ApiKey = Depends(require_scope("camera:read")),
 ) -> SnapshotResponse:
+    """Select a fresh persisted snapshot from the current source; never capture a fallback.
+
+    Requires camera:read. Explicit snapshot-ID image download remains available
+    for older frames without the latest-selection freshness check.
+    """
     check_camera_access(api_key, camera_id)
     camera = (await db.execute(select(Camera.rtsp_url, Camera.stream_enabled).where(Camera.id == camera_id))).one_or_none()
     if camera is None:
@@ -62,7 +80,9 @@ async def get_latest_snapshot(
     return response(snapshot, request)
 
 
-@router.get("/{snapshot_id}/image", response_class=StreamingResponse, responses={200: {"content": {"image/jpeg": {}}}})
+@router.get("/{snapshot_id}/image", response_class=StreamingResponse, responses={
+    200: {"content": {"image/jpeg": {"schema": {"type": "string", "format": "binary"}}}},
+})
 async def download_snapshot(
     camera_id: UUID, snapshot_id: UUID, db: AsyncSession = Depends(get_db),
     api_key: ApiKey = Depends(require_scope("camera:read")),
