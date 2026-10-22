@@ -16,6 +16,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # This existing revision ID exceeds Alembic's default VARCHAR(32).
+    # Keep its identity stable while allowing fresh databases to reach it.
+    op.execute('ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(64)')
     op.add_column(
         'depth_scales',
         sa.Column('is_active', sa.Boolean(), default=True, nullable=False),

@@ -32,6 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     libgl1 \
     curl \
+    ffmpeg \
+    coreutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder

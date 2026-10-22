@@ -23,6 +23,7 @@ engine: AsyncEngine = create_async_engine(
     max_overflow=settings.DATABASE_MAX_OVERFLOW,
     pool_pre_ping=True,
     echo=settings.DEBUG,
+    hide_parameters=True,  # Camera source URLs and WHEP secrets must not enter SQL logs.
 )
 
 # Session factory

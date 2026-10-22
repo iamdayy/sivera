@@ -1,5 +1,6 @@
 """Security utilities: API key authentication."""
 from typing import Optional
+from uuid import UUID
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -80,3 +81,8 @@ def require_scope(required_scope: str):
             )
         return api_key
     return check_scope
+
+
+def check_camera_access(api_key: ApiKey, camera_id: UUID) -> None:
+    if api_key.camera_id is not None and str(api_key.camera_id) != str(camera_id):
+        raise HTTPException(status_code=403, detail="API key cannot access this camera")

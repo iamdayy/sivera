@@ -1,6 +1,7 @@
 """File storage abstraction (local filesystem / S3 compatible)."""
 import os
 import shutil
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import BinaryIO, Optional
@@ -8,6 +9,7 @@ from uuid import uuid4
 
 import boto3
 from botocore.exceptions import ClientError
+from botocore.config import Config
 from api.core.config import settings, STORAGE_ROOT
 
 
@@ -67,8 +69,15 @@ class LocalStorage(StorageBackend):
     def save(self, key: str, data: BinaryIO, content_type: str = "application/octet-stream") -> str:
         path = self._resolve(key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as f:
-            shutil.copyfileobj(data, f)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as f:
+                temporary = Path(f.name)
+                shutil.copyfileobj(data, f)
+            os.replace(temporary, path)
+        finally:
+            if temporary is not None and temporary.exists():
+                temporary.unlink()
         return f"/files/{key}"
     
     def get(self, key: str) -> Optional[BinaryIO]:
@@ -117,6 +126,7 @@ class S3Storage(StorageBackend):
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             endpoint_url=endpoint_url,
+            config=Config(connect_timeout=3, read_timeout=10, retries={"max_attempts": 2}),
         )
         # Ensure bucket exists
         try:

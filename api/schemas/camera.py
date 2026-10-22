@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional, List, Any
 from uuid import UUID
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_serializer
 from geoalchemy2.shape import to_shape
 from shapely.geometry import Point, Polygon
 
@@ -36,11 +36,18 @@ class CameraUpdate(BaseModel):
 
 
 class CameraResponse(CameraBase):
+    rtsp_url: Optional[str] = Field(None, deprecated=True, description="Never returned; submit source URLs only on writes.")
+    rtsp_configured: bool = False
+    stream_enabled: bool = False
     id: UUID
     created_at: datetime
     updated_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
+
+    @field_serializer("rtsp_url")
+    def hide_rtsp_url(self, value: Optional[str]) -> None:
+        return None
     
     @classmethod
     def from_orm_with_geo(cls, obj) -> "CameraResponse":
@@ -48,7 +55,9 @@ class CameraResponse(CameraBase):
         data = {
             "id": obj.id,
             "name": obj.name,
-            "rtsp_url": obj.rtsp_url,
+            "rtsp_url": None,
+            "rtsp_configured": bool(obj.rtsp_url),
+            "stream_enabled": bool(obj.stream_enabled),
             "resolution_w": obj.resolution_w,
             "resolution_h": obj.resolution_h,
             "fps": obj.fps,

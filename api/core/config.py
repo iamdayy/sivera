@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 from typing import List, Optional
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -72,6 +73,34 @@ class Settings(BaseSettings):
     MIN_CALIB_IMAGES: int = 10
     RECOMMENDED_CALIB_IMAGES: int = 20
     
+    # MediaMTX (CCTV Streaming)
+    MEDIAMTX_HOST: str = "localhost"
+    MEDIAMTX_RTSP_PORT: int = 8554
+    MEDIAMTX_WEBRTC_PORT: int = 8889
+    MEDIAMTX_HLS_PORT: int = 8888
+    MEDIAMTX_API_PORT: int = 9997
+    MEDIAMTX_RTMP_PORT: int = 1935
+    MEDIAMTX_ENABLED: bool = False
+    MEDIAMTX_API_USER: str = "sivera_api"
+    MEDIAMTX_API_PASSWORD: SecretStr = SecretStr("")
+    MEDIAMTX_READ_USER: str = "sivera_reader"
+    MEDIAMTX_READ_PASSWORD: SecretStr = SecretStr("")
+    MEDIAMTX_ALLOWED_RTSP_HOSTS: str = ""
+    MEDIAMTX_RECONCILE_INTERVAL: int = Field(30, ge=5, le=3600)
+    MEDIAMTX_SESSION_TTL_SEC: int = Field(86400, ge=60, le=604800)
+    MEDIAMTX_MAX_SDP_BYTES: int = Field(65536, ge=1024, le=1048576)
+    MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS: str = "127.0.0.1"
+    # Stream settings
+    STREAM_TIMEOUT: int = Field(10, ge=1, le=60)
+    STREAM_RETRY_ATTEMPTS: int = Field(3, ge=1, le=5)
+    STREAM_CAPTURE_TIMEOUT: int = Field(15, ge=1, le=60)
+    CAPTURE_MAX_FRAME_BYTES: int = Field(10485760, ge=65536, le=52428800)
+    CAPTURE_MAX_PIXELS: int = Field(16777216, ge=65536, le=67108864)
+    CAPTURE_MAX_CONSECUTIVE_FAILURES: int = Field(3, ge=1, le=5)
+    CAPTURE_HEARTBEAT_TIMEOUT_SEC: int = Field(45, ge=15, le=120)
+    CAPTURE_QUEUE_TIMEOUT_SEC: int = Field(120, ge=30, le=600)
+    CAPTURE_RECONCILE_INTERVAL_SEC: int = Field(5, ge=1, le=30)
+
     # Pagination
     DEFAULT_PAGE_SIZE: int = 20
     MAX_PAGE_SIZE: int = 100

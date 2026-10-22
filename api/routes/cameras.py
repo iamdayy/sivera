@@ -1,15 +1,18 @@
 """Camera API routes."""
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update
 from sqlalchemy.orm import selectinload
 
 from api.core.config import settings
 from api.core.database import get_db
-from api.core.security import verify_api_key, require_scope
-from api.models.orm import Camera, Calibration
+from api.core.security import verify_api_key, require_scope, check_camera_access
+from api.routes.streams import get_mediamtx, stream_error
+from api.services.mediamtx_service import MediaMTXError, MediaMTXService, validate_rtsp_source
+from api.services.stream_service import reconcile_streams
+from api.models.orm import ApiKey, Camera, Calibration
 from api.schemas.camera import (
     CameraCreate, CameraUpdate, CameraResponse, CameraListResponse, CameraWithActiveCalib
 )
@@ -25,9 +28,11 @@ router = APIRouter(tags=["cameras"])
 async def create_camera(
     camera_data: CameraCreate,
     db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(require_scope("camera:write")),
+    api_key: ApiKey = Depends(require_scope("camera:write")),
 ):
     """Register a new camera."""
+    if api_key.camera_id is not None:
+        raise HTTPException(status_code=403, detail="Camera-bound keys cannot register cameras")
     camera = Camera(
         name=camera_data.name,
         rtsp_url=camera_data.rtsp_url,
@@ -66,10 +71,12 @@ async def list_cameras(
     page_size: int = Query(20, ge=1, le=100),
     active_only: bool = Query(False),
     db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(require_scope("camera:read")),
+    api_key: ApiKey = Depends(require_scope("camera:read")),
 ):
     """List cameras with pagination."""
     query = select(Camera)
+    if api_key.camera_id is not None:
+        query = query.where(Camera.id == api_key.camera_id)
     
     if active_only:
         # Join with calibrations to filter cameras with active calibration
@@ -98,9 +105,10 @@ async def list_cameras(
 async def get_camera(
     camera_id: UUID,
     db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(require_scope("camera:read")),
+    api_key: ApiKey = Depends(require_scope("camera:read")),
 ):
     """Get camera details with active calibration info."""
+    check_camera_access(api_key, camera_id)
     result = await db.execute(
         select(Camera)
         .options(selectinload(Camera.calibrations))
@@ -127,10 +135,13 @@ async def get_camera(
 async def update_camera(
     camera_id: UUID,
     camera_data: CameraUpdate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(require_scope("camera:write")),
+    api_key: ApiKey = Depends(require_scope("camera:write")),
+    service: MediaMTXService = Depends(get_mediamtx),
 ):
     """Update camera metadata."""
+    check_camera_access(api_key, camera_id)
     result = await db.execute(select(Camera).where(Camera.id == camera_id))
     camera = result.scalar_one_or_none()
     
@@ -138,6 +149,14 @@ async def update_camera(
         raise HTTPException(status_code=404, detail="Camera not found")
     
     update_data = camera_data.model_dump(exclude_unset=True)
+    if "rtsp_url" in update_data and camera.stream_enabled:
+        if update_data["rtsp_url"] is None:
+            camera.stream_enabled = False
+        else:
+            try:
+                validate_rtsp_source(update_data["rtsp_url"], service.config)
+            except MediaMTXError as exc:
+                raise stream_error(exc) from None
     
     # Handle geo fields separately
     if "latitude" in update_data or "longitude" in update_data:
@@ -169,17 +188,21 @@ async def update_camera(
     
     await db.flush()
     await db.refresh(camera)
-    
+    await db.commit()
+    background_tasks.add_task(reconcile_streams, service)
     return CameraResponse.from_orm_with_geo(camera)
 
 
 @router.delete("/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_camera(
     camera_id: UUID,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(require_scope("camera:write")),
+    api_key: ApiKey = Depends(require_scope("camera:write")),
+    service: MediaMTXService = Depends(get_mediamtx),
 ):
     """Delete camera (cascades to calibrations, jobs, etc.)."""
+    check_camera_access(api_key, camera_id)
     result = await db.execute(select(Camera).where(Camera.id == camera_id))
     camera = result.scalar_one_or_none()
     
@@ -187,4 +210,6 @@ async def delete_camera(
         raise HTTPException(status_code=404, detail="Camera not found")
     
     await db.delete(camera)
+    await db.commit()
+    background_tasks.add_task(reconcile_streams, service)
     # Cascade will handle related records

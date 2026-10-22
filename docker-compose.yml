@@ -42,6 +42,7 @@ services:
       - ./models:/models
       - ./data:/data
       - ./test:/app/test
+      - artifacts:/app/storage
     ports:
       - "8000:8000"
     depends_on:
@@ -58,6 +59,16 @@ services:
       - STORAGE_LOCAL_ROOT=/app/storage
       - DEBUG=true
       - PYTHONPATH=/app
+      - MEDIAMTX_HOST=mediamtx
+      - MEDIAMTX_RTSP_PORT=8554
+      - MEDIAMTX_WEBRTC_PORT=8889
+      - MEDIAMTX_HLS_PORT=8888
+      - MEDIAMTX_API_PORT=9997
+      - MEDIAMTX_RTMP_PORT=1935
+      - MEDIAMTX_ENABLED=${MEDIAMTX_ENABLED:-false}
+      - STREAM_TIMEOUT=10
+      - STREAM_RETRY_ATTEMPTS=3
+      - STREAM_CAPTURE_TIMEOUT=${STREAM_CAPTURE_TIMEOUT:-15}
     env_file:
       - .env
 
@@ -66,12 +77,13 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: waste-worker
-    command: celery -A api.workers.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A api.workers.celery_app worker -Q prediction,celery --loglevel=info --concurrency=2 --hostname=prediction@%h
     volumes:
       - ./api:/app/api
       - ./models:/models
       - ./data:/data
       - ./test:/app/test
+      - artifacts:/app/storage
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,6 +97,16 @@ services:
       - MODELS_DIR=/models
       - STORAGE_LOCAL_ROOT=/app/storage
       - PYTHONPATH=/app
+      - MEDIAMTX_HOST=mediamtx
+      - MEDIAMTX_RTSP_PORT=8554
+      - MEDIAMTX_WEBRTC_PORT=8889
+      - MEDIAMTX_HLS_PORT=8888
+      - MEDIAMTX_API_PORT=9997
+      - MEDIAMTX_RTMP_PORT=1935
+      - MEDIAMTX_ENABLED=${MEDIAMTX_ENABLED:-false}
+      - STREAM_TIMEOUT=10
+      - STREAM_RETRY_ATTEMPTS=3
+      - STREAM_CAPTURE_TIMEOUT=${STREAM_CAPTURE_TIMEOUT:-15}
     env_file:
       - .env
     healthcheck:
@@ -93,6 +115,40 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  capture-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: waste-capture-worker
+    command: celery -A api.workers.celery_app worker -Q capture --loglevel=info --concurrency=1 --hostname=capture@%h
+    volumes:
+      - ./api:/app/api
+      - artifacts:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://waste:waste@postgres/waste_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - STORAGE_LOCAL_ROOT=/app/storage
+      - PYTHONPATH=/app
+      - MEDIAMTX_HOST=mediamtx
+      - MEDIAMTX_RTSP_PORT=8554
+      - MEDIAMTX_ENABLED=${MEDIAMTX_ENABLED:-false}
+      - STREAM_CAPTURE_TIMEOUT=${STREAM_CAPTURE_TIMEOUT:-15}
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A api.workers.celery_app inspect ping -d capture@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   flower:
     build:
@@ -117,6 +173,49 @@ services:
       retries: 3
       start_period: 15s
 
+  mediamtx:
+    image: bluenviron/mediamtx:1.20.0-ffmpeg
+    container_name: waste-mediamtx
+    working_dir: /
+    volumes:
+      - ./deploy/mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "127.0.0.1:8554:8554"   # RTSP, backend containers use the internal network
+      - "127.0.0.1:8888:8888"   # HLS
+      - "127.0.0.1:8889:8889"   # WHEP signaling is proxied by the backend
+      - "127.0.0.1:1935:1935"   # RTMP
+      - "127.0.0.1:9997:9997"   # API
+      - "8189:8189/udp"   # WebRTC media (ICE)
+    environment:
+      - MTX_API=true
+      - MTX_APIADDRESS=:9997
+      - MTX_RTSP=true
+      - MTX_RTSPADDRESS=:8554
+      - MTX_RTMP=true
+      - MTX_RTMPADDRESS=:1935
+      - MTX_HLS=true
+      - MTX_HLSADDRESS=:8888
+      - MTX_WEBRTC=true
+      - MTX_WEBRTCADDRESS=:8889
+      - MTX_AUTHINTERNALUSERS_1_USER=${MEDIAMTX_API_USER:-sivera_api}
+      - MTX_AUTHINTERNALUSERS_1_PASS=${MEDIAMTX_API_PASSWORD:?Set MEDIAMTX_API_PASSWORD in .env}
+      - MTX_AUTHINTERNALUSERS_2_USER=${MEDIAMTX_READ_USER:-sivera_reader}
+      - MTX_AUTHINTERNALUSERS_2_PASS=${MEDIAMTX_READ_PASSWORD:?Set MEDIAMTX_READ_PASSWORD in .env}
+      - MTX_RTSPTRANSPORTS=tcp
+      - MTX_WEBRTCLOCALUDPADDRESS=:8189
+      - MTX_WEBRTCIPSFROMINTERFACES=false
+      - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS:-127.0.0.1}
+    depends_on:
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9997/v3/paths/list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
 volumes:
   pgdata:
   redisdata:
+  artifacts:

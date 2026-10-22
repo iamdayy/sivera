@@ -1,7 +1,8 @@
 """FastAPI application factory and main entry point."""
 import mimetypes
+import asyncio
+from contextlib import suppress
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Path as FastAPIPath
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +14,10 @@ from api.core.config import settings, STORAGE_ROOT
 from api.core.database import AsyncSession, get_db, init_db, close_db, engine
 from api.core.security import verify_api_key
 from api.core.storage import get_storage
-from api.routes import cameras, calibrations, ground_refs, predictions
+from api.routes import cameras, calibrations, calibration_captures, ground_refs, predictions, streams
+from api.services.mediamtx_service import MediaMTXService
+from api.services.stream_service import reconciliation_loop
+from api.services.calibration_capture_service import capture_reconciliation_loop
 
 
 @asynccontextmanager
@@ -21,16 +25,23 @@ async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup
     await init_db()
-    # Ensure storage root directory exists (created at startup, not import time)
-    try:
+    if settings.STORAGE_BACKEND.lower() == "local":
+        # Fail startup rather than let API and workers silently use different roots.
         STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        # Fallback to a directory under the project root (writable in this environment)
-        fallback_root = Path("./storage")
-        fallback_root.mkdir(parents=True, exist_ok=True)
-    yield
-    # Shutdown
-    await close_db()
+    app.state.mediamtx = MediaMTXService()
+    reconciler = asyncio.create_task(reconciliation_loop(app.state.mediamtx))
+    capture_reconciler = asyncio.create_task(capture_reconciliation_loop())
+    try:
+        yield
+    finally:
+        reconciler.cancel()
+        with suppress(asyncio.CancelledError):
+            await reconciler
+        capture_reconciler.cancel()
+        with suppress(asyncio.CancelledError):
+            await capture_reconciler
+        await app.state.mediamtx.close()
+        await close_db()
 
 
 # Custom OpenAPI schema with security
@@ -66,7 +77,9 @@ def custom_openapi():
         routes=app.routes,
         tags=[
             {"name": "cameras", "description": "Camera registry and management"},
+            {"name": "streams", "description": "Camera stream state and authenticated WebRTC/WHEP signaling"},
             {"name": "calibrations", "description": "Camera calibration from chessboard images"},
+            {"name": "calibration-captures", "description": "Bounded RTSP frame capture; calibration computation is not yet available"},
             {"name": "ground-references", "description": "Ground plane reference points and homography"},
             {"name": "ground-models", "description": "Computed ground models and BEV preview"},
             {"name": "predictions", "description": "Waste detection, depth, volume estimation"},
@@ -128,6 +141,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Location", "ETag", "Link", "Accept-Post", "Accept-Patch"],
 )
 
 # Artefact file serving (authenticated)
@@ -139,6 +153,9 @@ async def serve_artefact(
     api_key=Depends(verify_api_key),
 ):
     """Serve a stored artefact file with API-key authentication."""
+    if "calibration-captures" in path.replace("\\", "/").split("/"):
+        await calibration_captures.authorize_capture_artifact(db, path, api_key)
+        return await calibration_captures.image_response(path)
     storage = get_storage()
     if not storage.exists(path):
         raise HTTPException(status_code=404, detail="Artefact not found")
@@ -155,7 +172,9 @@ async def serve_artefact(
 
 # Include routers (all under /api/v1 prefix with proper sub-paths)
 app.include_router(cameras.router, prefix="/api/v1/cameras")
+app.include_router(streams.router, prefix="/api/v1/cameras/{camera_id}")
 app.include_router(calibrations.router, prefix="/api/v1/cameras/{camera_id}/calibrations")
+app.include_router(calibration_captures.router, prefix="/api/v1/cameras/{camera_id}/calibration-captures")
 app.include_router(ground_refs.router, prefix="/api/v1/cameras/{camera_id}/ground-references")
 app.include_router(ground_refs.model_router, prefix="/api/v1/cameras/{camera_id}/ground-models")
 app.include_router(predictions.router, prefix="/api/v1/cameras/{camera_id}/predict")

@@ -64,6 +64,9 @@ This is a conceptual view. Preserve the service interfaces and ordering actually
 - `api/models/orm.py`: SQLAlchemy entities, including cameras, calibrations, ground references/models, depth scales, prediction jobs/outputs, detected instances, volume estimates, and API keys.
 - `api/schemas/`: request/response models.
 - `api/routes/cameras.py`: camera registry and metadata.
+- `api/routes/streams.py`: stream desired state and authenticated WHEP proxy.
+- `api/services/mediamtx_service.py`: bounded Control API/signaling requests to MediaMTX v1.20.0.
+- `api/services/stream_service.py`: periodic desired-state reconciliation and expired-session cleanup.
 - `api/routes/calibrations.py`: chessboard calibration and version activation.
 - `api/routes/ground_refs.py`: image/world correspondences, ground models, and BEV preview.
 - `api/routes/predictions.py`: prediction submission, job/output retrieval, and result data.
@@ -87,7 +90,7 @@ This is a conceptual view. Preserve the service interfaces and ordering actually
 
 - Authentication uses the `X-API-Key` header. Keys may be configured through `VALID_API_KEYS` and/or stored hashed in the database. Scope checks cover camera, calibration, ground-reference, and prediction operations.
 - Prefer live `/openapi.json`, route declarations, and schema code over potentially stale README examples.
-- Current route prefixes are mounted directly, including `/cameras`, `/cameras/{camera_id}/calibrations`, `/cameras/{camera_id}/ground-references`, and `/cameras/{camera_id}/predict`. Verify before changing them.
+- Current route prefixes are mounted explicitly under `/api/v1/cameras` in `api/main.py`, including calibrations, ground references, streams, and predictions. Verify OpenAPI before changing them.
 - Prediction accepts source types named `upload`, `rtsp_frame`, and `latest_rtsp`, but the current handler only processes uploads and raises `NotImplementedError` for RTSP sources.
 - The prediction handler currently runs the pipeline synchronously despite returning HTTP 202 and containing a TODO about queueing work with Celery. Do not describe it as truly asynchronous until queue dispatch, status transitions, and polling are implemented and tested.
 - Validate response models and ensure OpenAPI accurately reflects multipart fields and response shapes.
@@ -125,3 +128,24 @@ This is a conceptual view. Preserve the service interfaces and ordering actually
 ## 10. Definition of done
 
 A backend change is complete when it preserves or documents API compatibility, includes appropriate tests and migrations, keeps units and coordinate assumptions explicit, handles errors and secrets safely, updates documentation when behavior changes, and reports which checks actually ran.
+
+## 11. MediaMTX integration (phase 1)
+
+- `Camera.stream_enabled` persists desired state, default false. Source remains private; camera responses return `rtsp_url=null`, `rtsp_configured`, and `stream_enabled`. The dashboard must not overwrite an unchanged source with null.
+- Exact source hostname/IP allowlist, RTSP/RTSPS only, TCP pulls and on-demand sources. Deployment must enforce camera-network egress limits independently of hostname validation.
+- Owned paths are `sivera_<UUID>`. A PostgreSQL advisory transaction lock serializes reconcilers across API processes. Only canonical UUID namespace paths are removed, never unrelated paths. Failed sync is retried periodically; camera changes commit before background reconciliation.
+- WHEP OPTIONS/POST/PATCH/DELETE require API key and camera:read, with camera-bound key restrictions. PostgreSQL `StreamSession` maps a public UUID to the private MediaMTX secret and an HMAC of the owning API key. PATCH/DELETE reauthenticate ownership, including across API workers/restarts. Absolute session TTL and cleanup are bounded by reconciliation; DELETE clears upstream before removing mapping.
+- Upstream API and reader credentials are separate. No anonymous public read/publish. Loopback-only admin exists for container healthcheck. HTTP ports are localhost-only on the host; UDP ICE 8189 is published. Dashboard signaling is HTTPS through FastAPI in production; media goes directly to MediaMTX. TURN/TCP are deployment-specific.
+- Forward only SDP, ETag, Accept-Post/Patch, ICE Link; rewrite Location to backend route. No upstream redirects/raw error details. POST is not retried. SQL parameters and HTTP WHEP secret URLs are redacted from normal logs.
+- This phase does not implement calibration capture or RTSP prediction. A browser-compatible camera codec and reachable ICE candidate are required; signaling success alone does not verify playback.
+
+## 12. RTSP calibration capture (phase 2)
+
+- `CalibrationCaptureSession` and `CalibrationCaptureImage` persist UUIDs, validated chessboard parameters in meters, counters, source dimensions, UTC timestamps, deadline, heartbeat, safe error codes, and private storage keys. A PostgreSQL partial unique index permits one queued/running/stopping session per camera. Capture is independent of existing calibration records and never activates calibration.
+- Authenticated JSON start (202), status, stop, paginated images, and JPEG download are mounted at `/api/v1/cameras/{camera_id}/calibration-captures`. All operations enforce calibration scopes and camera-bound key restrictions. Generic `/files` cannot bypass these restrictions for capture artifacts. No RTSP URLs, worker token, or S3 URLs enter capture responses.
+- Phase 2 `target_images` counts stored frames, not quality-approved frames. `auto_calibrate` accepts only false; `/compute` and chessboard/blur/diversity selection are phase 3. `completed` means capture target reached. Existing upload calibration semantics are unchanged.
+- Session creation commits before queue dispatch. The persistent queued row acts as an outbox, redispatched at most every 15 seconds by the API startup/periodic reconciler. Duplicate delivery uses an atomic queued-to-running claim and per-run fencing token. Queue outage retains queued state until queue timeout or deadline; no reliance on Celery result backend for progress.
+- Capture worker consumes only queue `capture`, concurrency 1 in Compose; prediction worker consumes `prediction` and legacy `celery` to drain pre-deployment jobs. New default queue is `prediction`; capture has an explicit route. API, both workers, and FFmpeg runtime share storage through `api/core/storage.py`. Async engines are created per capture task with NullPool to avoid cross-fork/cross-event-loop pooled connections. Database transactions do not span FFmpeg or storage writes.
+- FFmpeg pulls the authenticated original MediaMTX UUID relay over TCP, one JPEG per subprocess. No resize, crop, undistort, or autorotation. First-frame dimensions remain explicit; resolution/source changes fail the session. Timestamp records worker reception, not camera sensor time. Interval is the wait after each attempt. Frame bytes/pixels, attempts, subprocess duration, session deadline and Celery hard limit are bounded.
+- Stop cancels the in-flight process group and retains committed images. Coreutils `timeout` imposes a wall-clock bound even if the Celery child dies; FFmpeg decoder also receives the configured pixel limit. Deadline includes queue time. Reconciliation reaps stale workers and fences subsequent writes; interrupted running sessions fail rather than silently restart. Counters allow interrupted attempts without inventing zero results.
+- Local storage uses atomic replace; all services must use one writable root, with no silent fallback. New Compose volume requires operator backup/migration of pre-existing container-layer artifacts. S3 must remain private. Retention is not implemented; filesystem orphan cleanup and camera-deletion artifact cleanup are operator responsibilities, including crash between storage write and metadata commit.

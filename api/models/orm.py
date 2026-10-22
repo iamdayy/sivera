@@ -2,11 +2,13 @@
 import enum
 from datetime import datetime
 from typing import List, Optional
-from uuid import uuid4
+from uuid import UUID as UUIDType, uuid4
 
 from geoalchemy2 import Geography, Geometry
 from sqlalchemy import (
     JSON,
+    Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -17,6 +19,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
     select,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -61,6 +64,7 @@ class Camera(Base):
     id: Mapped[uuid4] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     rtsp_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    stream_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     location: Mapped[Optional[Geography]] = mapped_column(
         Geography(geometry_type="POINT", srid=4326), nullable=True
     )
@@ -98,6 +102,73 @@ class Camera(Base):
     
     def __repr__(self) -> str:
         return f"<Camera(id={self.id}, name='{self.name}', resolution={self.resolution_w}x{self.resolution_h})>"
+
+
+class StreamSession(Base):
+    __tablename__ = "stream_sessions"
+
+    id: Mapped[uuid4] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    camera_id: Mapped[uuid4] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    owner_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    upstream_id: Mapped[uuid4] = mapped_column(UUID(as_uuid=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class CalibrationCaptureSession(Base):
+    __tablename__ = "calibration_capture_sessions"
+
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    camera_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued", server_default="queued")
+    chessboard_cols: Mapped[int] = mapped_column(Integer, nullable=False)
+    chessboard_rows: Mapped[int] = mapped_column(Integer, nullable=False)
+    square_m: Mapped[float] = mapped_column(Float, nullable=False)
+    interval_sec: Mapped[float] = mapped_column(Float, nullable=False)
+    target_images: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_duration_sec: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempted: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    captured: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    resolution_w: Mapped[Optional[int]] = mapped_column(Integer)
+    resolution_h: Mapped[Optional[int]] = mapped_column(Integer)
+    worker_token: Mapped[Optional[UUIDType]] = mapped_column(UUID(as_uuid=True))
+    error_code: Mapped[Optional[str]] = mapped_column(String(64))
+    finish_reason: Mapped[Optional[str]] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_capture_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_dispatched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("uq_capture_active_camera", "camera_id", unique=True, postgresql_where=text("status IN ('queued', 'running', 'stopping')")),
+        CheckConstraint("status IN ('queued','running','stopping','completed','stopped','expired','failed')", name="ck_capture_status"),
+        CheckConstraint("attempted >= 0 AND captured >= 0 AND failed_attempts >= 0 AND captured + failed_attempts <= attempted", name="ck_capture_counts"),
+        CheckConstraint("chessboard_cols BETWEEN 2 AND 30 AND chessboard_rows BETWEEN 2 AND 30 AND square_m > 0 AND square_m <= 1 AND interval_sec BETWEEN 1 AND 60 AND target_images BETWEEN 1 AND 100 AND max_duration_sec BETWEEN 1 AND 900", name="ck_capture_parameters"),
+        Index("ix_capture_status_deadline", "status", "deadline_at"),
+    )
+
+
+class CalibrationCaptureImage(Base):
+    __tablename__ = "calibration_capture_images"
+
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    session_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), ForeignKey("calibration_capture_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence", name="uq_capture_image_sequence"),
+        CheckConstraint("sequence > 0 AND width > 0 AND height > 0 AND size_bytes > 0", name="ck_capture_image_dimensions"),
+    )
 
 
 class Calibration(Base):
