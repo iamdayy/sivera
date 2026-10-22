@@ -11,7 +11,7 @@ from uuid import UUID
 from PIL import Image, UnidentifiedImageError
 
 from api.core.config import Settings, settings
-from api.services.mediamtx_service import stream_path
+from api.services.mediamtx_service import MediaMTXError, MediaMTXService, desired_path, stream_path
 
 
 class CaptureError(Exception):
@@ -53,6 +53,18 @@ def decode_frame(content: bytes, config: Settings = settings) -> CapturedFrame:
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         raise CaptureError("capture_invalid_frame") from None
     return CapturedFrame(content, width, height, datetime.now(timezone.utc))
+
+
+async def check_relay_source(camera_id: UUID, source: str, config: Settings = settings) -> None:
+    relay = MediaMTXService(config)
+    try:
+        current = await relay.get_path_config(stream_path(camera_id))
+        if current is None or any(current.get(key) != value for key, value in desired_path(source).items()):
+            raise CaptureError("capture_stream_sync_pending")
+    except MediaMTXError as exc:
+        raise CaptureError(exc.code) from None
+    finally:
+        await relay.close()
 
 
 async def capture_frame(camera_id: UUID, config: Settings = settings) -> CapturedFrame:

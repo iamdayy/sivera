@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import Calibration, Camera
+from api.services.calibration_quality_service import detect_chessboard
 
 logger = logging.getLogger(__name__)
 
@@ -28,16 +29,11 @@ def calibrate_from_images(
     Run camera calibration from chessboard images.
     Returns dict with calibration results.
     """
-    pattern = (cols, rows)
-    objp = np.zeros((rows * cols, 3), np.float32)
-    objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * square_m
-
-    obj_pts, img_pts, used = [], [], []
+    img_pts, used = [], []
     size = None
-    flags = cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY
     
     for p in image_paths:
-        img = cv2.imread(str(p))
+        img = cv2.imread(str(p), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
         if img is None:
             continue
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -46,18 +42,38 @@ def calibrate_from_images(
         elif gray.shape[::-1] != size:
             logger.debug("[skip] %s: size %s != %s", p, gray.shape[::-1], size)
             continue
-        found, corners = cv2.findChessboardCornersSB(gray, pattern, flags=flags)
+        found, corners = detect_chessboard(gray, cols, rows, cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY)
         if not found:
             logger.debug("[skip] %s: chessboard not detected", p)
             continue
-        obj_pts.append(objp)
         img_pts.append(corners)
         used.append(str(p))
 
     if len(used) < settings.MIN_CALIB_IMAGES:
         raise ValueError(f"Only {len(used)} valid images; minimum {settings.MIN_CALIB_IMAGES} required")
 
+    return calibrate_from_points(img_pts, size, cols, rows, square_m, alpha, used)
+
+
+def calibrate_from_points(
+    img_pts: list[np.ndarray], size: tuple[int, int], cols: int, rows: int,
+    square_m: float, alpha: float = 0.0, used: list[str] | None = None,
+) -> dict:
+    if (not 3 <= cols <= 30 or not 3 <= rows <= 30 or len(size) != 2 or min(size) <= 0
+            or not np.isfinite(square_m) or not 0 < square_m <= 1 or not np.isfinite(alpha) or not 0 <= alpha <= 1):
+        raise ValueError("calibration_invalid_parameters")
+    if len(img_pts) < settings.MIN_CALIB_IMAGES:
+        raise ValueError("calibration_insufficient_images")
+    objp = np.zeros((rows * cols, 3), np.float32)
+    objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * square_m
+    obj_pts = [objp for _ in img_pts]
+    img_pts = [np.asarray(points, np.float32).reshape(-1, 1, 2) for points in img_pts]
+    if any(len(points) != rows * cols or not np.isfinite(points).all()
+           or (points < 0).any() or (points.reshape(-1, 2) >= size).any() for points in img_pts):
+        raise ValueError("calibration_invalid_corners")
     rms, K, dist, rvecs, tvecs = cv2.calibrateCamera(obj_pts, img_pts, size, None, None)
+    if not np.isfinite(K).all() or not np.isfinite(dist).all() or not np.isfinite(rms) or K[0, 0] <= 0 or K[1, 1] <= 0:
+        raise ValueError("calibration_invalid_result")
 
     # Per-view errors
     per_view = []
@@ -74,6 +90,8 @@ def calibrate_from_images(
 
     # Optimal new camera matrix (undistorted)
     K_new, _ = cv2.getOptimalNewCameraMatrix(K, dist, size, alpha, size)
+    if not np.isfinite(K_new).all() or not np.isfinite(per_view).all() or min(K_new[0, 0], K_new[1, 1]) <= 0:
+        raise ValueError("calibration_invalid_result")
 
     return {
         "K": K.tolist(),
@@ -82,8 +100,8 @@ def calibrate_from_images(
         "K_undist": K_new.tolist(),
         "rms": float(rms),
         "per_view": per_view,
-        "used": used,
-        "coverage": coverage,
+        "used": used or [],
+        "coverage": [float(value) for value in coverage],
         "alpha": alpha,
     }
 
@@ -133,6 +151,9 @@ async def save_calibration_to_db(
         camera_id=camera.id,
         version=version,
         k_matrix=calib_result["K_undist"],  # Store K_undist as primary K for undistorted images
+        k_original=calib_result["K"], k_undist=calib_result["K_undist"],
+        resolution_w=calib_result["size"][0], resolution_h=calib_result["size"][1],
+        alpha=calib_result["alpha"], per_view_errors=calib_result["per_view"],
         dist_coeffs=calib_result["dist"],
         rms_reproj=calib_result["rms"],
         coverage_w=calib_result["coverage"][0] * 100,
@@ -212,6 +233,7 @@ async def process_calibration_upload(
         
         # Determine next version number
         from sqlalchemy import select, func
+        await db.scalar(select(Camera.id).where(Camera.id == camera.id).with_for_update())
         max_ver = await db.execute(
             select(func.max(Calibration.version)).where(Calibration.camera_id == camera.id)
         )

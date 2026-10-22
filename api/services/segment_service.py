@@ -1,5 +1,6 @@
 """Segmentation service: wraps segment.py logic."""
 import json
+import io
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import PredictionJob
+from api.services.image_service import encode_image
 
 
 COLORS = {
@@ -155,17 +157,12 @@ async def run_segmentation(
     # Save individual class masks
     for cls_name, cls_mask in class_masks_dict.items():
         key = generate_storage_key(str(job.camera_id), str(job.id), f"mask_{norm(cls_name)}", "png")
-        import io
-        buf = io.BytesIO()
-        cv2.imwrite(buf, (cls_mask * 255).astype(np.uint8), [cv2.IMWRITE_PNG_COMPRESSION, 3])
-        buf.seek(0)
+        buf = io.BytesIO(encode_image((cls_mask * 255).astype(np.uint8), ".png"))
         storage.save(key, buf, "image/png")
     
     # Save combined waste mask
     mask_key = generate_storage_key(str(job.camera_id), str(job.id), "mask", "png")
-    buf = io.BytesIO()
-    cv2.imwrite(buf, (waste_mask * 255).astype(np.uint8), [cv2.IMWRITE_PNG_COMPRESSION, 3])
-    buf.seek(0)
+    buf = io.BytesIO(encode_image((waste_mask * 255).astype(np.uint8), ".png"))
     storage.save(mask_key, buf, "image/png")
     
     # Save instances JSON
@@ -182,9 +179,7 @@ async def run_segmentation(
     # Save overlay
     overlay_img = overlay_instances(image, instances)
     overlay_key = generate_storage_key(str(job.camera_id), str(job.id), "overlay", "jpg")
-    buf = io.BytesIO()
-    cv2.imwrite(buf, overlay_img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    buf.seek(0)
+    buf = io.BytesIO(encode_image(overlay_img))
     storage.save(overlay_key, buf, "image/jpeg")
     
     return {

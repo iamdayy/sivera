@@ -15,7 +15,9 @@ from api.core.database import get_db_context
 from api.core.storage import StorageBackend, generate_storage_key
 from api.models.orm import Camera, CalibrationCaptureImage, CalibrationCaptureSession
 from api.services.mediamtx_service import MediaMTXError, validate_rtsp_source
-from api.services.rtsp_capture_service import CaptureError, CapturedFrame, capture_frame
+from api.services.rtsp_capture_service import CaptureError, CapturedFrame, capture_frame, check_relay_source
+from api.services.calibration_quality_service import FrameQuality, assess_frame_bounded
+from api.services.vision_process_service import VisionError
 
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,9 @@ def finish(session: CalibrationCaptureSession, status: str, reason: str, now: da
     session.finish_reason = reason
     session.completed_at = now
     session.worker_token = None
+    if session.auto_calibrate and status in {"completed", "stopped", "expired"} and session.compute_status == "none":
+        session.compute_status = "queued"
+        session.compute_requested_at = now
 
 
 def expire_session(session: CalibrationCaptureSession, now: datetime, config: Settings = settings) -> bool:
@@ -111,6 +116,10 @@ async def reconcile_captures(config: Settings = settings) -> None:
 async def capture_reconciliation_loop(config: Settings = settings) -> None:
     while True:
         await reconcile_captures(config)
+        from api.services.calibration_compute_service import reconcile_computations
+        await reconcile_computations(config)
+        from api.services.prediction_worker_service import reconcile_predictions
+        await reconcile_predictions(config)
         await asyncio.sleep(config.CAPTURE_RECONCILE_INTERVAL_SEC)
 
 
@@ -122,6 +131,7 @@ class CaptureRunner:
         self.config = config
         self.token = uuid4()
         self.source: str | None = None
+        self.descriptors: list[list[float]] = []
 
     async def claim(self) -> CalibrationCaptureSession | None:
         async with self.db_context() as db:
@@ -167,6 +177,13 @@ class CaptureRunner:
                 finish(session, "failed", "source_changed", utcnow())
                 session.error_code = "capture_source_changed"
                 return False
+            from api.services.snapshot_service import source_hash
+            identity = source_hash(camera.rtsp_url, self.config)
+            if session.source_hash is not None and session.source_hash != identity:
+                finish(session, "failed", "source_changed", utcnow())
+                session.error_code = "capture_source_changed"
+                return False
+            session.source_hash = identity
             self.source = camera.rtsp_url
             session.heartbeat_at = utcnow()
             if attempt:
@@ -183,6 +200,7 @@ class CaptureRunner:
         return await self.tick()
 
     async def monitored_frame(self, camera_id: UUID) -> CapturedFrame | None:
+        await check_relay_source(camera_id, self.source, self.config)
         task = asyncio.create_task(capture_frame(camera_id, self.config))
         try:
             while True:
@@ -207,14 +225,26 @@ class CaptureRunner:
             if terminal:
                 finish(session, "failed", "capture_failed", utcnow())
 
-    async def save_frame(self, camera_id: UUID, frame: CapturedFrame) -> bool:
+    async def save_frame(self, camera_id: UUID, frame: CapturedFrame, quality: FrameQuality | None = None) -> bool:
         key = generate_storage_key(str(camera_id), str(self.session_id), "calibration-captures", "jpg")
         discard = True
         try:
             await asyncio.to_thread(self.storage.save, key, io.BytesIO(frame.content), "image/jpeg")
             async with self.db_context() as db:
+                camera = (await db.execute(select(Camera.rtsp_url, Camera.stream_enabled).where(
+                    Camera.id == camera_id,
+                ).with_for_update())).one_or_none()
                 session = await self.locked_session(db)
                 if session is None or expire_session(session, utcnow(), self.config):
+                    return False
+                from api.services.snapshot_service import source_hash
+                if camera is None or not camera.stream_enabled or not camera.rtsp_url:
+                    session.error_code = "capture_stream_disabled"
+                    finish(session, "failed", "stream_disabled", utcnow())
+                    return False
+                if session.source_hash != source_hash(camera.rtsp_url, self.config):
+                    session.error_code = "capture_source_changed"
+                    finish(session, "failed", "source_changed", utcnow())
                     return False
                 if session.resolution_w is not None and (session.resolution_w, session.resolution_h) != (frame.width, frame.height):
                     session.failed_attempts += 1
@@ -225,13 +255,29 @@ class CaptureRunner:
                 session.captured += 1
                 session.last_capture_at = frame.captured_at
                 session.error_code = None
+                if quality is not None:
+                    if quality.status == "accepted":
+                        session.accepted += 1
+                    else:
+                        session.rejected += 1
+                        counts = dict(session.rejection_counts or {})
+                        counts[quality.reason] = counts.get(quality.reason, 0) + 1
+                        session.rejection_counts = counts
                 db.add(CalibrationCaptureImage(
                     id=uuid4(), session_id=self.session_id, sequence=session.captured,
                     storage_key=key, width=frame.width, height=frame.height,
                     size_bytes=len(frame.content), captured_at=frame.captured_at,
+                    quality_status=quality.status if quality else "unassessed",
+                    rejection_reason=quality.reason if quality else None,
+                    sharpness=quality.sharpness if quality else None,
+                    corners=quality.corners if quality else None,
+                    pose_descriptor=quality.descriptor if quality else None,
                 ))
-                if session.captured >= session.target_images:
+                count = session.accepted if session.selection_version else session.captured
+                if count >= session.target_images:
                     finish(session, "completed", "target_reached", utcnow())
+                elif session.captured >= 300:
+                    finish(session, "expired", "frame_limit", utcnow())
             discard = False
             return True
         finally:
@@ -257,10 +303,21 @@ class CaptureRunner:
             while await self.tick(attempt=True):
                 try:
                     frame = await self.monitored_frame(session.camera_id)
-                    if frame is None or not await self.save_frame(session.camera_id, frame):
+                    if frame is None:
                         return
+                    quality = None
+                    if session.selection_version:
+                        quality = await assess_frame_bounded(frame, session.chessboard_cols, session.chessboard_rows, self.descriptors, self.config, self.tick)
+                    if not await self.tick():
+                        return
+                    if not await self.save_frame(session.camera_id, frame, quality):
+                        return
+                    if quality and quality.status == "accepted":
+                        self.descriptors.append(quality.descriptor)
                     failures = 0
-                except CaptureError as exc:
+                except (CaptureError, VisionError) as exc:
+                    if exc.code == "vision_cancelled":
+                        return
                     failures += 1
                     terminal = failures >= self.config.CAPTURE_MAX_CONSECUTIVE_FAILURES or exc.code in {
                         "capture_ffmpeg_missing", "capture_runtime_missing", "stream_service_not_configured", "capture_frame_too_large",

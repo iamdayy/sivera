@@ -1,6 +1,8 @@
 """Unit tests for volume estimation (pure functions, no database)."""
 import numpy as np
 import pytest
+import asyncio
+from unittest.mock import MagicMock, AsyncMock
 
 from api.services.volume_service import (
     estimate_volume_convexhull,
@@ -53,6 +55,10 @@ class TestEstimateVolumeGrid:
         assert vol > 0.0
         assert footprint == 0.05 ** 2
 
+    def test_tiny_cells_reject_unbounded_grid(self):
+        with pytest.raises(ValueError, match="prediction_volume_grid_too_large"):
+            estimate_volume_grid(np.array([0., 1.]), np.array([0., 1.]), np.ones(2), cell_m=1e-9)
+
 
 class TestEstimateVolumeConvexHull:
     def test_known_convexhull_volume(self, synthetic_lifted_points):
@@ -68,14 +74,17 @@ class TestEstimateVolumeConvexHull:
         Y = np.array([0.0, 0.0])
         H = np.array([0.1, 0.2])
         vol, footprint = estimate_volume_convexhull(X, Y, H)
-        assert vol == 0.0
-        assert footprint == 0.0
+        assert vol is None
+        assert footprint is None
 
     def test_empty_points(self, empty_points):
         X, Y, H, uv = empty_points
         vol, footprint = estimate_volume_convexhull(X, Y, H)
-        assert vol == 0.0
-        assert footprint == 0.0
+        assert vol is None
+        assert footprint is None
+
+    def test_collinear_points_remain_missing(self):
+        assert estimate_volume_convexhull(np.arange(4), np.arange(4), np.ones(4)) == (None, None)
 
 
 class TestEstimatePerInstance:
@@ -111,3 +120,22 @@ class TestEstimatePerInstance:
             img_shape=(200, 200),
         )
         assert results == []
+
+
+@pytest.mark.parametrize("points", [0, 2])
+def test_unavailable_estimates_are_null_and_npz_nan(monkeypatch, tmp_path, points):
+    from api.models.orm import PredictionJob, VolumeEstimate
+    from api.core.storage import LocalStorage
+    from api.services import volume_service
+    from uuid import uuid4
+    storage = LocalStorage(tmp_path)
+    monkeypatch.setattr(volume_service, "get_storage", lambda: storage)
+    db = MagicMock(flush=AsyncMock())
+    job = PredictionJob(id=uuid4(), camera_id=uuid4())
+    values = np.array([0., 1.])[:points]
+    result = asyncio.run(volume_service.save_volume_results(db, job, values, values, np.ones(points),
+        np.zeros((points, 2), int), [], (480, 640), .1, 3))
+    assert result["volume_grid"] is None and result["volume_convex_hull"] is None
+    assert not any(isinstance(call.args[0], VolumeEstimate) for call in db.add.call_args_list)
+    with storage.get(result["volume_npz_key"]) as stream, np.load(stream, allow_pickle=False) as artifact:
+        assert np.isnan(artifact["vol_grid"]) and np.isnan(artifact["vol_hull"])

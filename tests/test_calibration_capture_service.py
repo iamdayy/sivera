@@ -33,13 +33,15 @@ def session_fixture(**overrides):
         attempted=0, captured=0, failed_attempts=0, interval_sec=1, target_images=2,
         chessboard_cols=9, chessboard_rows=6, square_m=0.025, max_duration_sec=300,
         resolution_w=None, resolution_h=None, error_code=None, finish_reason=None, last_capture_at=None,
+        selection_version=0, auto_calibrate=False, accepted=0, rejected=0, rejection_counts={},
+        compute_status="none", compute_requested_at=None, compute_dispatched_at=None, compute_started_at=None,
     )
     values.update(overrides)
     return CalibrationCaptureSession(**values)
 
 
 @pytest.mark.parametrize(("field", "value"), [
-    ("auto_calibrate", True), ("interval_sec", 0), ("target_images", 101),
+    ("interval_sec", 0), ("target_images", 101),
     ("max_duration_sec", 901), ("square_m", float("nan")), ("chessboard_cols", 1),
     ("unknown", True),
 ])
@@ -168,6 +170,7 @@ def runner(tmp_path, monkeypatch):
         return session
     db.scalar.side_effect = scalar
     monkeypatch.setattr(service, "capture_frame", AsyncMock(return_value=rtsp.decode_frame(jpeg())))
+    monkeypatch.setattr(service, "check_relay_source", AsyncMock())
     async def wait(_):
         return await worker.tick()
     monkeypatch.setattr(worker, "wait", wait)
@@ -277,6 +280,22 @@ async def test_stop_between_storage_write_and_commit_discards_frame(runner, monk
 
 
 @pytest.mark.anyio
+async def test_source_change_between_storage_write_and_commit_discards_frame(runner, monkeypatch):
+    await runner.worker.claim()
+    assert await runner.worker.tick(attempt=True)
+    save = runner.worker.storage.save
+    def change_after_write(*args):
+        result = save(*args)
+        runner.camera.rtsp_url = "rtsp://camera.local/changed"
+        return result
+    monkeypatch.setattr(runner.worker.storage, "save", change_after_write)
+    assert not await runner.worker.save_frame(runner.session.camera_id, rtsp.decode_frame(jpeg()))
+    assert runner.session.error_code == "capture_source_changed"
+    assert runner.images == []
+    assert list(runner.worker.storage.root.rglob("*.jpg")) == []
+
+
+@pytest.mark.anyio
 async def test_queue_publish_failure_keeps_committed_outbox(monkeypatch):
     db = SimpleNamespace(scalar=AsyncMock(return_value=uuid4()), commit=AsyncMock())
     monkeypatch.setattr(service, "publish_capture", AsyncMock(side_effect=RuntimeError("secret")))
@@ -319,3 +338,35 @@ def test_capture_queue_is_separate_and_bounded():
     assert "api.workers.tasks.capture_task" in celery_app.conf.include
     assert run_capture_task.time_limit == 960
     assert run_capture_task.reject_on_worker_lost is True
+
+
+@pytest.mark.anyio
+async def test_new_sessions_target_accepted_frames_and_auto_compute(runner, monkeypatch):
+    from api.services.calibration_quality_service import FrameQuality
+    runner.session.selection_version = 1
+    runner.session.auto_calibrate = True
+    assess = AsyncMock(side_effect=[
+        FrameQuality("rejected", "blur", 5, None, None),
+        FrameQuality("accepted", None, 100, [[1, 2]], [1, 2]),
+        FrameQuality("accepted", None, 100, [[1, 2]], [3, 4]),
+    ])
+    monkeypatch.setattr(service, "assess_frame_bounded", assess)
+    await runner.worker.run()
+    assert runner.session.status == "completed"
+    assert runner.session.accepted == 2 and runner.session.rejected == 1
+    assert runner.session.attempted == runner.session.captured == 3
+    assert runner.session.rejection_counts == {"blur": 1}
+    assert runner.session.compute_status == "queued"
+    assert runner.session.compute_requested_at is not None
+
+
+@pytest.mark.anyio
+async def test_frame_limit_prevents_unbounded_rejected_storage(runner, monkeypatch):
+    from api.services.calibration_quality_service import FrameQuality
+    runner.session.selection_version = 1
+    runner.session.captured = runner.session.attempted = runner.session.rejected = 299
+    monkeypatch.setattr(service, "assess_frame_bounded", AsyncMock(return_value=FrameQuality("rejected", "chessboard_not_found", 0, None, None)))
+    await runner.worker.run()
+    assert runner.session.status == "expired"
+    assert runner.session.finish_reason == "frame_limit"
+    assert runner.session.accepted == 0

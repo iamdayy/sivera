@@ -1,4 +1,6 @@
 """Calibration API routes."""
+import asyncio
+import logging
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
@@ -8,30 +10,32 @@ from sqlalchemy.orm import selectinload
 
 from api.core.config import settings
 from api.core.database import get_db
-from api.core.security import verify_api_key, require_scope
-from api.models.orm import Camera, Calibration
+from api.core.security import check_camera_access, require_scope
+from api.models.orm import ApiKey, Camera, Calibration
 from api.schemas.calibration import (
     CalibrationCreate, CalibrationResponse, CalibrationListResponse, 
     CalibrationActivateResponse, UndistortPreviewResponse
 )
-from api.services.calibration_service import process_calibration_upload, undistort_image, scale_K_for_resolution
-from api.core.storage import get_storage, validate_image_content
+from api.services.calibration_service import process_calibration_upload
+from api.services.image_service import decode_prediction_image
+from api.core.storage import get_storage
 
 
 router = APIRouter(tags=["calibrations"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("", response_model=CalibrationResponse, status_code=status.HTTP_201_CREATED)
 async def create_calibration(
     camera_id: UUID,
-    chessboard_cols: int = Form(settings.DEFAULT_CHESSBOARD_COLS),
-    chessboard_rows: int = Form(settings.DEFAULT_CHESSBOARD_ROWS),
-    square_m: float = Form(settings.DEFAULT_SQUARE_M),
-    alpha: float = Form(0.0),
+    chessboard_cols: int = Form(settings.DEFAULT_CHESSBOARD_COLS, ge=3, le=30),
+    chessboard_rows: int = Form(settings.DEFAULT_CHESSBOARD_ROWS, ge=3, le=30),
+    square_m: float = Form(settings.DEFAULT_SQUARE_M, gt=0, le=1, allow_inf_nan=False),
+    alpha: float = Form(0.0, ge=0, le=1, allow_inf_nan=False),
     notes: Optional[str] = Form(None),
     files: List[UploadFile] = File(...),
     db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(require_scope("calibration:write")),
+    api_key: ApiKey = Depends(require_scope("calibration:write")),
 ):
     """
     Upload chessboard images and run calibration.
@@ -40,13 +44,17 @@ async def create_calibration(
     Images should be JPG/PNG/BMP format.
     """
     # Verify camera exists
+    check_camera_access(api_key, camera_id)
     camera_result = await db.execute(select(Camera).where(Camera.id == camera_id))
     camera = camera_result.scalar_one_or_none()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
     
     # Read uploaded files
+    if len(files) > 100:
+        raise HTTPException(status_code=413, detail={"code": "calibration_too_many_images"})
     image_files = []
+    total_bytes = 0
     for f in files:
         # Pre-read size check (from Content-Length header)
         if f.size is not None and f.size > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
@@ -54,13 +62,15 @@ async def create_calibration(
                 status_code=413,
                 detail=f"File '{f.filename}' too large. Maximum {settings.MAX_UPLOAD_SIZE_MB}MB.",
             )
-        content = await f.read()
-        # Validate content (size + magic bytes)
+        content = await f.read(settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1)
+        total_bytes += len(content)
+        if total_bytes > 100 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail={"code": "calibration_upload_too_large"})
         try:
-            validate_image_content(content, f.filename or "image",
-                                   settings.MAX_UPLOAD_SIZE_MB)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            await asyncio.to_thread(decode_prediction_image, content)
+        except ValueError as exc:
+            raise HTTPException(status_code=413 if str(exc) == "prediction_image_too_large" else 400,
+                                detail={"code": "calibration_invalid_image"}) from None
         if content:
             image_files.append((f.filename, content))
     
@@ -85,9 +95,10 @@ async def create_calibration(
         await db.refresh(calibration)
         return CalibrationResponse.model_validate(calibration)
     except ValueError as e:
+        await db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        print(f"Calibration processing error: {e}")
+    except Exception:
+        logger.warning("Calibration upload failed camera=%s", camera_id)
         await db.rollback()
         raise HTTPException(
             status_code=500,
@@ -102,6 +113,7 @@ async def list_calibrations(
     api_key: str = Depends(require_scope("calibration:read")),
 ):
     """List all calibration versions for a camera."""
+    check_camera_access(api_key, camera_id)
     # Verify camera exists
     camera_result = await db.execute(select(Camera).where(Camera.id == camera_id))
     camera = camera_result.scalar_one_or_none()
@@ -128,6 +140,7 @@ async def get_active_calibration(
     api_key: str = Depends(require_scope("calibration:read")),
 ):
     """Get the currently active calibration for a camera."""
+    check_camera_access(api_key, camera_id)
     result = await db.execute(
         select(Calibration)
         .where(Calibration.camera_id == camera_id, Calibration.is_active == True)
@@ -148,6 +161,7 @@ async def get_calibration(
     api_key: str = Depends(require_scope("calibration:read")),
 ):
     """Get specific calibration version."""
+    check_camera_access(api_key, camera_id)
     result = await db.execute(
         select(Calibration)
         .where(Calibration.id == calibration_id, Calibration.camera_id == camera_id)
@@ -168,6 +182,8 @@ async def activate_calibration(
     api_key: str = Depends(require_scope("calibration:write")),
 ):
     """Set a calibration version as active (deactivates others)."""
+    check_camera_access(api_key, camera_id)
+    await db.scalar(select(Camera.id).where(Camera.id == camera_id).with_for_update())
     # Verify calibration belongs to camera
     result = await db.execute(
         select(Calibration)
@@ -188,6 +204,7 @@ async def activate_calibration(
     # Activate selected
     calibration.is_active = True
     await db.flush()
+    await db.commit()
     await db.refresh(calibration)
     
     return CalibrationActivateResponse(
@@ -207,6 +224,7 @@ async def get_undistort_preview(
     api_key: str = Depends(require_scope("calibration:read")),
 ):
     """Get undistort preview for a calibration (uses first calibration image)."""
+    check_camera_access(api_key, camera_id)
     result = await db.execute(
         select(Calibration)
         .where(Calibration.id == calibration_id, Calibration.camera_id == camera_id)
@@ -230,12 +248,18 @@ async def get_undistort_preview(
     if img_data is None:
         raise HTTPException(status_code=400, detail="Calibration image not found in storage")
     
-    img_array = np.frombuffer(img_data.read(), np.uint8)
+    try:
+        img_array = np.frombuffer(img_data.read(settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1), np.uint8)
+    finally:
+        img_data.close()
     img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
     if img is None:
         raise HTTPException(status_code=400, detail="Cannot decode calibration image")
     
-    K = np.array(calibration.k_matrix, np.float64)
+    if calibration.k_original is None:
+        raise HTTPException(status_code=409, detail={"code": "calibration_intrinsics_missing", "message": "Recalibrate to store original intrinsics"})
+    K = np.array(calibration.k_original, np.float64)
+    K_target = np.array(calibration.k_undist or calibration.k_matrix, np.float64)
     dist = np.array(calibration.dist_coeffs, np.float64)
     
     storage = get_storage()
@@ -250,7 +274,7 @@ async def get_undistort_preview(
         )
     
     # Generate preview if not cached
-    undist = cv2.undistort(img, K, dist, None, K)
+    undist = cv2.undistort(img, K, dist, None, K_target)
     
     import io
     success, buf_arr = cv2.imencode(".jpg", undist, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -276,6 +300,8 @@ async def delete_calibration(
     api_key: str = Depends(require_scope("calibration:write")),
 ):
     """Delete a calibration version (cannot delete active)."""
+    check_camera_access(api_key, camera_id)
+    await db.scalar(select(Camera.id).where(Camera.id == camera_id).with_for_update())
     result = await db.execute(
         select(Calibration)
         .where(Calibration.id == calibration_id, Calibration.camera_id == camera_id)

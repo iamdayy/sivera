@@ -14,7 +14,7 @@ from api.core.config import settings, STORAGE_ROOT
 from api.core.database import AsyncSession, get_db, init_db, close_db, engine
 from api.core.security import verify_api_key
 from api.core.storage import get_storage
-from api.routes import cameras, calibrations, calibration_captures, ground_refs, predictions, streams
+from api.routes import cameras, calibrations, calibration_captures, ground_refs, predictions, streams, snapshots
 from api.services.mediamtx_service import MediaMTXService
 from api.services.stream_service import reconciliation_loop
 from api.services.calibration_capture_service import capture_reconciliation_loop
@@ -79,7 +79,8 @@ def custom_openapi():
             {"name": "cameras", "description": "Camera registry and management"},
             {"name": "streams", "description": "Camera stream state and authenticated WebRTC/WHEP signaling"},
             {"name": "calibrations", "description": "Camera calibration from chessboard images"},
-            {"name": "calibration-captures", "description": "Bounded RTSP frame capture; calibration computation is not yet available"},
+            {"name": "calibration-captures", "description": "Quality-selected RTSP capture and inactive calibration computation"},
+            {"name": "snapshots", "description": "Original-resolution RTSP snapshots with explicit freshness"},
             {"name": "ground-references", "description": "Ground plane reference points and homography"},
             {"name": "ground-models", "description": "Computed ground models and BEV preview"},
             {"name": "predictions", "description": "Waste detection, depth, volume estimation"},
@@ -156,6 +157,8 @@ async def serve_artefact(
     if "calibration-captures" in path.replace("\\", "/").split("/"):
         await calibration_captures.authorize_capture_artifact(db, path, api_key)
         return await calibration_captures.image_response(path)
+    from api.services.prediction_access_service import authorize_artifact
+    await authorize_artifact(db, path, api_key)
     storage = get_storage()
     if not storage.exists(path):
         raise HTTPException(status_code=404, detail="Artefact not found")
@@ -173,6 +176,7 @@ async def serve_artefact(
 # Include routers (all under /api/v1 prefix with proper sub-paths)
 app.include_router(cameras.router, prefix="/api/v1/cameras")
 app.include_router(streams.router, prefix="/api/v1/cameras/{camera_id}")
+app.include_router(snapshots.router, prefix="/api/v1/cameras/{camera_id}/snapshots")
 app.include_router(calibrations.router, prefix="/api/v1/cameras/{camera_id}/calibrations")
 app.include_router(calibration_captures.router, prefix="/api/v1/cameras/{camera_id}/calibration-captures")
 app.include_router(ground_refs.router, prefix="/api/v1/cameras/{camera_id}/ground-references")

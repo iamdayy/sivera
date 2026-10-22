@@ -1,4 +1,8 @@
 """Prediction API routes."""
+import asyncio
+import io
+import json
+from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime
@@ -9,20 +13,25 @@ from sqlalchemy.orm import selectinload
 
 from api.core.config import settings
 from api.core.database import get_db
-from api.core.security import verify_api_key, require_scope
-from api.core.storage import get_storage, validate_image_content
+from api.core.security import check_camera_access, require_scope
+from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import (
-    Camera, Calibration, GroundModel, DepthScale, 
+    ApiKey, Camera,
     PredictionJob, PredictionOutput, DetectedInstance, VolumeEstimate
 )
 from api.schemas.prediction import (
-    PredictionJobCreate, PredictionJobResponse, PredictionJobSubmitResponse,
+    PREDICTION_OUTPUT_TYPES, PredictionJobResponse, PredictionJobSubmitResponse,
     PredictionJobListResponse,
     PredictionOutputsResponse, PredictionOutputResponse,
     DetectedInstanceResponse, VolumeEstimateResponse
 )
 from api.services.prediction_orchestrator import submit_prediction_job
 from api.workers.celery_app import celery_app
+from api.services.image_service import decode_prediction_image
+from api.services.prediction_access_service import require_job
+from api.services.snapshot_service import latest_snapshot, require_rtsp_camera
+from api.services.rtsp_capture_service import CaptureError
+from api.services.calibration_capture_service import utcnow
 
 
 router = APIRouter(tags=["predictions"])
@@ -31,69 +40,53 @@ router = APIRouter(tags=["predictions"])
 @router.post("", response_model=PredictionJobSubmitResponse, status_code=status.HTTP_202_ACCEPTED)
 async def submit_prediction(
     camera_id: UUID,
-    source_type: str = Form(..., pattern="^(upload|rtsp_frame|latest_rtsp)$"),
+    source_type: str = Form(..., pattern="^(upload|rtsp_frame|latest_rtsp)$",
+                           description="upload: image file; rtsp_frame: fresh capture at worker execution; latest_rtsp: latest persisted snapshot at execution"),
     timestamp: Optional[datetime] = Form(None),
     seg_model: Optional[str] = Form(None),
-    seg_conf: float = Form(0.25),
+    seg_conf: float = Form(0.25, ge=0, le=1, allow_inf_nan=False),
     seg_classes: Optional[str] = Form(None),  # JSON string
-    volume_cell_m: float = Form(0.05),
-    volume_min_pts_per_cell: int = Form(2),
-    return_outputs: Optional[str] = Form(None),  # JSON string
+    volume_cell_m: float = Form(0.05, gt=0, le=1, allow_inf_nan=False),
+    volume_min_pts_per_cell: int = Form(2, ge=1, le=10000),
+    max_frame_age_sec: int = Form(30, ge=1, le=300, description="Maximum RTSP snapshot age in seconds, checked again by the worker"),
+    return_outputs: Optional[str] = Form(None, description="JSON array of output types: omitted registers all, [] registers none. Internal artifacts may still be generated"),
     file: Optional[UploadFile] = File(None),
     db: AsyncSession = Depends(get_db),
-    api_key: str = Depends(require_scope("predict:write")),
+    api_key: ApiKey = Depends(require_scope("predict:write")),
 ):
-    """
-    Submit a prediction job.
-    
-    For source_type="upload", a file must be provided.
-    For source_type="rtsp_frame" or "latest_rtsp", the system will fetch from camera RTSP.
-    """
-    # Verify camera exists
+    """Queue upload, worker-time RTSP capture, or a freshness-bounded persisted snapshot."""
+    check_camera_access(api_key, camera_id)
     camera_result = await db.execute(select(Camera).where(Camera.id == camera_id))
     camera = camera_result.scalar_one_or_none()
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
     
-    # Check active calibration, ground model, depth scale
-    calib_result = await db.execute(
-        select(Calibration).where(Calibration.camera_id == camera_id, Calibration.is_active == True)
-    )
-    if not calib_result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="No active calibration for camera")
-    
-    gr_result = await db.execute(
-        select(GroundModel).join(GroundModel.ground_reference)
-        .where(GroundModel.camera_id == camera_id, GroundReference.is_active == True)
-    )
-    if not gr_result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="No active ground model for camera")
-    
-    ds_result = await db.execute(
-        select(DepthScale)
-        .where(DepthScale.camera_id == camera_id)
-        .order_by(DepthScale.created_at.desc())
-    )
-    if not ds_result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="No depth scale for camera")
-    
-    # Parse optional JSON fields
-    import json
-    seg_classes_list = None
-    if seg_classes:
+    def string_list(value: str | None, field: str) -> list[str] | None:
+        if value is None:
+            return None
         try:
-            seg_classes_list = json.loads(seg_classes)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON for seg_classes")
-    
-    return_outputs_list = None
-    if return_outputs:
+            result = json.loads(value)
+            if not isinstance(result, list) or len(result) > 100 or any(not isinstance(item, str) or len(item) > 100 for item in result):
+                raise ValueError()
+            return result
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail={"code": "prediction_invalid_parameters", "field": field}) from None
+    seg_classes_list = string_list(seg_classes, "seg_classes")
+    return_outputs_list = string_list(return_outputs, "return_outputs")
+    if return_outputs_list is not None and not set(return_outputs_list).issubset(PREDICTION_OUTPUT_TYPES):
+        raise HTTPException(status_code=422, detail={"code": "prediction_invalid_outputs"})
+    if seg_model and (Path(seg_model).name != seg_model or "\\" in seg_model or len(seg_model) > 100):
+        raise HTTPException(status_code=422, detail={"code": "prediction_invalid_model"})
+    identity = None
+    if source_type != "upload":
+        if file is not None or timestamp is not None:
+            raise HTTPException(status_code=422, detail={"code": "rtsp_source_disallows_file_or_timestamp"})
         try:
-            return_outputs_list = json.loads(return_outputs)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON for return_outputs")
-    
-    # Handle file upload
+            identity = require_rtsp_camera(camera)
+            if source_type == "latest_rtsp":
+                await latest_snapshot(db, camera_id, identity, max_frame_age_sec)
+        except CaptureError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from None
     source_path = None
     if source_type == "upload":
         if not file:
@@ -106,46 +99,49 @@ async def submit_prediction(
                 detail=f"File too large. Maximum {settings.MAX_UPLOAD_SIZE_MB}MB.",
             )
         
-        # Save uploaded file
         storage = get_storage()
-        import io
-        content = await file.read()
-        # Validate content (size + magic bytes)
+        content = await file.read(settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1)
         try:
-            validate_image_content(content, file.filename or "upload",
-                                   settings.MAX_UPLOAD_SIZE_MB)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        key = f"cameras/{camera_id}/uploads/{UUID(int=0).hex}_{file.filename}"
-        buf = io.BytesIO(content)
-        storage.save(key, buf, file.content_type or "image/jpeg")
-        source_path = key
+            await asyncio.to_thread(decode_prediction_image, content)
+        except ValueError as exc:
+            raise HTTPException(status_code=413 if str(exc) == "prediction_image_too_large" else 400, detail={"code": str(exc)}) from None
+        source_path = generate_storage_key(str(camera_id), output_type="uploads", extension="image")
     
     # Create job
-    job = await submit_prediction_job(
-        db=db,
-        camera_id=camera_id,
-        source_type=source_type,
-        source_path=source_path,
-        source_ts=timestamp,
-        seg_model=seg_model,
-        seg_conf=seg_conf,
-        seg_classes=seg_classes_list,
-    )
-    
-    await db.commit()
-    await db.refresh(job)
-    
-    # Queue prediction as Celery task (true asynchronous, matches 202 Accepted)
     try:
-        celery_app.send_task(
+        job = await submit_prediction_job(
+            db=db, camera_id=camera_id, source_type=source_type, source_path=source_path,
+            source_ts=timestamp, seg_model=seg_model, seg_conf=seg_conf, seg_classes=seg_classes_list,
+            volume_cell_m=volume_cell_m, volume_min_pts_per_cell=volume_min_pts_per_cell,
+            return_outputs=return_outputs_list, max_frame_age_sec=max_frame_age_sec, source_hash=identity,
+        )
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"code": str(exc)}) from None
+    try:
+        if source_path:
+            await asyncio.to_thread(storage.save, source_path, io.BytesIO(content), file.content_type or "application/octet-stream")
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        if source_path:
+            try:
+                await asyncio.to_thread(storage.delete, source_path)
+            except Exception:
+                pass
+        raise HTTPException(status_code=503, detail={"code": "prediction_submission_failed"}) from None
+    
+    try:
+        await asyncio.to_thread(celery_app.send_task,
             "api.workers.tasks.predict_task.run_prediction_task",
             args=[str(job.id)],
+            queue="prediction", retry=False,
         )
-    except Exception as e:
+    except Exception:
         # If queueing fails, mark job failed and return 503
-        job.status = "failed"
-        job.error_msg = "Prediction queue unavailable"
+        await db.execute(update(PredictionJob).where(PredictionJob.id == job.id, PredictionJob.status == "pending").values(
+            status="failed", error_msg="prediction_queue_unavailable", completed_at=utcnow(),
+        ))
         await db.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -168,6 +164,7 @@ async def get_prediction_job(
     api_key: str = Depends(require_scope("predict:read")),
 ):
     """Get prediction job status and result."""
+    check_camera_access(api_key, camera_id)
     result = await db.execute(
         select(PredictionJob)
         .options(
@@ -195,6 +192,7 @@ async def list_prediction_jobs(
     api_key: str = Depends(require_scope("predict:read")),
 ):
     """List prediction jobs for a camera."""
+    check_camera_access(api_key, camera_id)
     query = select(PredictionJob).where(PredictionJob.camera_id == camera_id)
     
     if status:
@@ -226,6 +224,7 @@ async def get_prediction_outputs(
     api_key: str = Depends(require_scope("predict:read")),
 ):
     """List all output files for a prediction job."""
+    await require_job(db, camera_id, job_id, api_key)
     result = await db.execute(
         select(PredictionOutput)
         .where(PredictionOutput.job_id == job_id)
@@ -247,6 +246,7 @@ async def download_prediction_output(
     api_key: str = Depends(require_scope("predict:read")),
 ):
     """Download a specific output file."""
+    await require_job(db, camera_id, job_id, api_key)
     result = await db.execute(
         select(PredictionOutput)
         .where(PredictionOutput.job_id == job_id, PredictionOutput.output_type == output_type)
@@ -278,6 +278,7 @@ async def get_prediction_instances(
     api_key: str = Depends(require_scope("predict:read")),
 ):
     """Get detected instances for a prediction job."""
+    await require_job(db, camera_id, job_id, api_key)
     result = await db.execute(
         select(DetectedInstance)
         .where(DetectedInstance.job_id == job_id)
@@ -296,6 +297,7 @@ async def get_prediction_volumes(
     api_key: str = Depends(require_scope("predict:read")),
 ):
     """Get volume estimates for a prediction job."""
+    await require_job(db, camera_id, job_id, api_key)
     result = await db.execute(
         select(VolumeEstimate)
         .where(VolumeEstimate.job_id == job_id)

@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     CAPTURE_HEARTBEAT_TIMEOUT_SEC: int = Field(45, ge=15, le=120)
     CAPTURE_QUEUE_TIMEOUT_SEC: int = Field(120, ge=30, le=600)
     CAPTURE_RECONCILE_INTERVAL_SEC: int = Field(5, ge=1, le=30)
+    CALIB_CAPTURE_MIN_SHARPNESS: float = Field(80, ge=0, le=10000)
+    CALIB_COMPUTE_TIMEOUT_SEC: int = Field(300, ge=30, le=600)
 
     # Pagination
     DEFAULT_PAGE_SIZE: int = 20

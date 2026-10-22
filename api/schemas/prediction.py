@@ -1,11 +1,19 @@
 """Pydantic schemas for Prediction API."""
 from datetime import datetime
-from typing import Optional, List, Any
+from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel, Field, ConfigDict
 
 
+PREDICTION_OUTPUT_TYPES = frozenset({
+    "mask", "overlay", "instances_json", "depth_raw_vis", "depth_scaled_vis", "depth_masked",
+    "height_map", "lifted_points_npz", "volume_heatmap", "volume_result_npz",
+    "bev_image", "bev_mask_proyeksi", "bev_overlay",
+})
+
+
 class PredictionJobCreate(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     source_type: str = Field(..., pattern="^(upload|rtsp_frame|latest_rtsp)$")
     source_path: Optional[str] = None
     timestamp: Optional[datetime] = None
@@ -13,8 +21,9 @@ class PredictionJobCreate(BaseModel):
     seg_conf: float = Field(0.25, ge=0.0, le=1.0)
     seg_classes: Optional[List[str]] = None
     volume_cell_m: float = Field(0.05, gt=0.0, le=1.0)
-    volume_min_pts_per_cell: int = Field(2, ge=1)
+    volume_min_pts_per_cell: int = Field(2, ge=1, le=10000)
     return_outputs: Optional[List[str]] = None
+    max_frame_age_sec: int = Field(30, ge=1, le=300)
 
 
 class PredictionJobResponse(BaseModel):
@@ -27,9 +36,13 @@ class PredictionJobResponse(BaseModel):
     source_type: str
     source_path: Optional[str]
     source_ts: Optional[datetime]
+    max_frame_age_sec: int = 30
+    volume_cell_m: float = 0.05
+    volume_min_pts_per_cell: int = 2
     seg_model: Optional[str]
     seg_conf: float
     seg_classes: Optional[List[str]]
+    return_outputs: Optional[List[str]] = None
     result: Optional[dict]
     error_msg: Optional[str]
     started_at: Optional[datetime]

@@ -147,7 +147,7 @@ def test_missing_uuid_and_validation(setup):
     setup.store["session"] = None
     assert setup.client.get(f"{setup.url}/{uuid4()}").status_code == 404
     assert setup.client.get(f"{setup.url}/invalid").status_code == 422
-    assert setup.client.post(setup.url, json={"auto_calibrate": True}).status_code == 422
+    assert setup.client.post(setup.url, json={"auto_calibrate": True}).status_code == 202
     app.dependency_overrides.pop(verify_api_key)
     setup.client.headers.pop("X-API-Key")
     assert setup.client.post(setup.url, json={}).status_code == 422
@@ -156,7 +156,7 @@ def test_missing_uuid_and_validation(setup):
 def test_image_list_download_and_no_generic_file_bypass(setup):
     image = CalibrationCaptureImage(id=uuid4(), session_id=setup.session.id, sequence=1,
         storage_key=f"cameras/{setup.camera.id}/calibration-captures/{setup.session.id}/frame.jpg",
-        width=640, height=480, size_bytes=len(jpeg()), captured_at=utcnow())
+        width=640, height=480, size_bytes=len(jpeg()), captured_at=utcnow(), quality_status="unassessed")
     setup.store["image"] = image
     import io
     setup.storage.save(image.storage_key, io.BytesIO(jpeg()))
@@ -198,4 +198,40 @@ def test_openapi_capture_contract(setup):
     assert "202" in path["post"]["responses"]
     assert "application/json" in path["post"]["requestBody"]["content"]
     assert path["post"]["security"] == [{"ApiKeyAuth": []}]
-    assert not any(p.endswith("/compute") for p in schema["paths"])
+    assert any(p.endswith("/compute") for p in schema["paths"])
+    fields = schema["components"]["schemas"]["CaptureCreate"]["properties"]
+    assert fields["chessboard_rows"]["minimum"] == 3
+    assert fields["auto_calibrate"]["default"] is False
+    upload = schema["paths"]["/api/v1/cameras/{camera_id}/calibrations"]["post"]
+    ref = upload["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"].split("/")[-1]
+    assert schema["components"]["schemas"][ref]["properties"]["chessboard_rows"]["minimum"] == 3
+    invalid = setup.client.post(f"/api/v1/cameras/{setup.camera.id}/calibrations",
+                                data={"chessboard_rows": "2"}, files={"files": ("board.jpg", jpeg(), "image/jpeg")})
+    assert invalid.status_code == 422
+
+
+def test_compute_insufficient_active_and_idempotent(setup):
+    url = f"{setup.url}/{setup.session.id}/compute"
+    assert setup.client.post(url).status_code == 409
+    setup.session.status = "completed"
+    assert setup.client.post(url).json()["detail"]["code"] == "calibration_insufficient_images"
+    setup.session.captured = 12
+    response = setup.client.post(url)
+    assert response.status_code == 202
+    assert response.json()["compute_status"] == "queued"
+    requested = setup.session.compute_requested_at
+    assert setup.client.post(url).status_code == 202
+    assert setup.session.compute_requested_at == requested
+    setup.key.camera_id = uuid4()
+    assert setup.client.post(url).status_code == 403
+
+
+def test_preview_auth_and_missing_artifact(setup):
+    url = f"{setup.url}/{setup.session.id}/images/{uuid4()}/preview"
+    assert setup.client.get(url).status_code == 404
+    image = CalibrationCaptureImage(id=uuid4(), session_id=setup.session.id, sequence=1,
+        storage_key="missing.jpg", width=640, height=480, size_bytes=100, captured_at=utcnow(), quality_status="accepted")
+    setup.store["image"] = image
+    assert setup.client.get(url).status_code == 503
+    setup.key.camera_id = uuid4()
+    assert setup.client.get(url).status_code == 403

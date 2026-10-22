@@ -131,6 +131,20 @@ class CalibrationCaptureSession(Base):
     attempted: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     captured: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    selection_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="0")
+    auto_calibrate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    source_hash: Mapped[Optional[str]] = mapped_column(String(64))
+    accepted: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    rejected: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    rejection_counts: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default="{}")
+    compute_status: Mapped[str] = mapped_column(String(20), nullable=False, default="none", server_default="none")
+    compute_token: Mapped[Optional[UUIDType]] = mapped_column(UUID(as_uuid=True))
+    compute_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    compute_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    compute_dispatched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    compute_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    compute_error_code: Mapped[Optional[str]] = mapped_column(String(64))
+    result_calibration_id: Mapped[Optional[UUIDType]] = mapped_column(UUID(as_uuid=True), ForeignKey("calibrations.id", ondelete="SET NULL"))
     resolution_w: Mapped[Optional[int]] = mapped_column(Integer)
     resolution_h: Mapped[Optional[int]] = mapped_column(Integer)
     worker_token: Mapped[Optional[UUIDType]] = mapped_column(UUID(as_uuid=True))
@@ -148,6 +162,8 @@ class CalibrationCaptureSession(Base):
         Index("uq_capture_active_camera", "camera_id", unique=True, postgresql_where=text("status IN ('queued', 'running', 'stopping')")),
         CheckConstraint("status IN ('queued','running','stopping','completed','stopped','expired','failed')", name="ck_capture_status"),
         CheckConstraint("attempted >= 0 AND captured >= 0 AND failed_attempts >= 0 AND captured + failed_attempts <= attempted", name="ck_capture_counts"),
+        CheckConstraint("accepted >= 0 AND rejected >= 0 AND accepted + rejected <= captured", name="ck_capture_selection_counts"),
+        CheckConstraint("compute_status IN ('none','queued','running','done','failed')", name="ck_capture_compute_status"),
         CheckConstraint("chessboard_cols BETWEEN 2 AND 30 AND chessboard_rows BETWEEN 2 AND 30 AND square_m > 0 AND square_m <= 1 AND interval_sec BETWEEN 1 AND 60 AND target_images BETWEEN 1 AND 100 AND max_duration_sec BETWEEN 1 AND 900", name="ck_capture_parameters"),
         Index("ix_capture_status_deadline", "status", "deadline_at"),
     )
@@ -164,6 +180,11 @@ class CalibrationCaptureImage(Base):
     height: Mapped[int] = mapped_column(Integer, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    quality_status: Mapped[str] = mapped_column(String(20), nullable=False, default="unassessed", server_default="unassessed")
+    rejection_reason: Mapped[Optional[str]] = mapped_column(String(64))
+    sharpness: Mapped[Optional[float]] = mapped_column(Float)
+    corners: Mapped[Optional[list]] = mapped_column(JSON)
+    pose_descriptor: Mapped[Optional[list]] = mapped_column(JSON)
 
     __table_args__ = (
         UniqueConstraint("session_id", "sequence", name="uq_capture_image_sequence"),
@@ -180,6 +201,12 @@ class Calibration(Base):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     k_matrix: Mapped[list] = mapped_column(JSON, nullable=False)  # 3x3 list
+    k_original: Mapped[Optional[list]] = mapped_column(JSON)
+    k_undist: Mapped[Optional[list]] = mapped_column(JSON)
+    resolution_w: Mapped[Optional[int]] = mapped_column(Integer)
+    resolution_h: Mapped[Optional[int]] = mapped_column(Integer)
+    alpha: Mapped[Optional[float]] = mapped_column(Float)
+    per_view_errors: Mapped[Optional[list]] = mapped_column(JSON)
     dist_coeffs: Mapped[list] = mapped_column(JSON, nullable=False)  # [k1,k2,p1,p2,k3]
     rms_reproj: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     coverage_w: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -337,9 +364,14 @@ class PredictionJob(Base):
     source_type: Mapped[SourceType] = mapped_column(String(20), nullable=False)
     source_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     source_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_hash: Mapped[Optional[str]] = mapped_column(String(64))
+    max_frame_age_sec: Mapped[int] = mapped_column(Integer, nullable=False, default=30, server_default="30")
+    volume_cell_m: Mapped[float] = mapped_column(Float, nullable=False, default=0.05, server_default="0.05")
+    volume_min_pts_per_cell: Mapped[int] = mapped_column(Integer, nullable=False, default=2, server_default="2")
     seg_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     seg_conf: Mapped[float] = mapped_column(Float, default=0.25, nullable=False)
     seg_classes: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    return_outputs: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     result: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     error_msg: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -368,6 +400,21 @@ class PredictionJob(Base):
     
     def __repr__(self) -> str:
         return f"<PredictionJob(id={self.id}, camera_id={self.camera_id}, status={self.status})>"
+
+
+class CameraSnapshot(Base):
+    __tablename__ = "camera_snapshots"
+
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    camera_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+    __table_args__ = (CheckConstraint("width > 0 AND height > 0 AND size_bytes > 0", name="ck_snapshot_dimensions"),)
 
 
 class PredictionOutput(Base):

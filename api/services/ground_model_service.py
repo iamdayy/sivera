@@ -13,6 +13,7 @@ from sqlalchemy import select, update
 from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import Camera, Calibration, GroundReference, GroundModel
+from api.services.image_service import encode_image
 
 
 def compute_ground_model(
@@ -303,8 +304,8 @@ async def generate_bev_preview(
         mask[h//2:, w//4:3*w//4] = True
     
     gm_dict = {
-        "H_i2w": ground_model.H_i2w,
-        "H_w2i": ground_model.H_w2i,
+        "H_i2w": np.array(ground_model.H_i2w, np.float64),
+        "H_w2i": np.array(ground_model.H_w2i, np.float64),
         "R": np.array(ground_model.R_matrix, np.float64),
         "t": np.array(ground_model.t_vector, np.float64).reshape(3, 1),
         "K": np.array(calibration.k_matrix, np.float64),
@@ -320,10 +321,8 @@ async def generate_bev_preview(
     # Save images
     import io
     
-    def save_img(image, suffix):
-        buf = io.BytesIO()
-        cv2.imwrite(buf, image, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        buf.seek(0)
+    def save_img(image: np.ndarray, suffix: str) -> str:
+        buf = io.BytesIO(encode_image(image))
         key = generate_storage_key(
             str(camera.id), 
             output_type=f"bev_{suffix}", 

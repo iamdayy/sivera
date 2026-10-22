@@ -5,12 +5,13 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
-from scipy.spatial import ConvexHull
+from scipy.spatial import ConvexHull, QhullError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import PredictionJob, DetectedInstance, VolumeEstimate
+from api.services.image_service import encode_image
 
 
 def estimate_volume_grid(
@@ -26,6 +27,8 @@ def estimate_volume_grid(
     
     nx = max(1, int(np.ceil((x_max - x_min) / cell_m)))
     ny = max(1, int(np.ceil((y_max - y_min) / cell_m)))
+    if nx * ny > 1000000:
+        raise ValueError("prediction_volume_grid_too_large")
     
     ix = np.clip(((X - x_min) / cell_m).astype(int), 0, nx - 1)
     iy = np.clip(((Y - y_min) / cell_m).astype(int), 0, ny - 1)
@@ -51,17 +54,17 @@ def estimate_volume_grid(
     return volume_m3, footprint_m2, grid_height, grid_info
 
 
-def estimate_volume_convexhull(X: np.ndarray, Y: np.ndarray, height: np.ndarray) -> Tuple[float, float]:
-    """Estimate volume using convex hull method."""
+def estimate_volume_convexhull(X: np.ndarray, Y: np.ndarray, height: np.ndarray) -> Tuple[float | None, float | None]:
+    """Estimate footprint-hull area times median height, not a true 3D hull."""
     if len(height) < 3:
-        return 0.0, 0.0
+        return None, None
     
     try:
         pts2d = np.stack([X, Y], axis=1)
         hull = ConvexHull(pts2d)
         footprint_m2 = float(hull.volume)
-    except Exception:
-        footprint_m2 = float((X.max() - X.min()) * (Y.max() - Y.min()))
+    except QhullError:
+        return None, None
     
     med_h = float(np.median(height))
     volume_m3 = footprint_m2 * med_h
@@ -97,15 +100,17 @@ def estimate_per_instance(
         n_pts = int(in_inst.sum())
         
         if n_pts < 3:
-            vol, foot = 0.0, 0.0
+            vol, foot = None, None
         else:
-            vol, foot, _, _ = estimate_volume_grid(xi, yi, hi, cell_m, min_pts_per_cell)
+            vol, foot, grid, _ = estimate_volume_grid(xi, yi, hi, cell_m, min_pts_per_cell)
+            if not (np.isfinite(grid) & (grid > 0)).any():
+                vol, foot = None, None
         
         results.append(dict(
             cls=ins["cls"],
             conf=ins["conf"],
-            volume_m3=round(vol, 6),
-            footprint_m2=round(foot, 6),
+            volume_m3=round(vol, 6) if vol is not None else None,
+            footprint_m2=round(foot, 6) if foot is not None else None,
             n_pts=n_pts,
         ))
     return results
@@ -165,9 +170,8 @@ async def save_volume_results(
     # Convex hull method
     vol_hull, foot_hull = estimate_volume_convexhull(X, Y, H)
     
-    # Save volume estimates only when there is data.
-    # Missing/failed estimates must remain missing, not represented as zero.
-    if len(H) > 0:
+    grid_available = bool((np.isfinite(grid_h) & (grid_h > 0)).any())
+    if grid_available:
         db.add(VolumeEstimate(
             job_id=job.id, method="grid",
             volume_m3=vol_grid, volume_liter=vol_grid * 1000,
@@ -176,6 +180,7 @@ async def save_volume_results(
             height_median_m=float(np.median(H)),
             n_cells=int(np.isfinite(grid_h).sum()), n_points=len(H),
         ))
+    if vol_hull is not None:
         db.add(VolumeEstimate(
             job_id=job.id, method="convex_hull",
             volume_m3=vol_hull, volume_liter=vol_hull * 1000,
@@ -205,8 +210,8 @@ async def save_volume_results(
     import io
     buf = io.BytesIO()
     np.savez(buf,
-             vol_grid=vol_grid, foot_grid=foot_grid,
-             vol_hull=vol_hull, foot_hull=foot_hull,
+             vol_grid=vol_grid if grid_available else np.nan, foot_grid=foot_grid if grid_available else np.nan,
+             vol_hull=vol_hull if vol_hull is not None else np.nan, foot_hull=foot_hull if foot_hull is not None else np.nan,
              grid_height=grid_h, cell_m=cell_m,
              x_min=ginfo.get("x_min", 0), y_min=ginfo.get("y_min", 0),
              nx=ginfo.get("nx", 0), ny=ginfo.get("ny", 0))
@@ -217,14 +222,12 @@ async def save_volume_results(
     hmap = render_volume_map(grid_h, ginfo)
     hmap = add_scale_bar(hmap, cell_m)
     hmap_key = generate_storage_key(str(job.camera_id), str(job.id), "volume_heatmap", "jpg")
-    buf = io.BytesIO()
-    cv2.imwrite(buf, hmap, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    buf.seek(0)
+    buf = io.BytesIO(encode_image(hmap))
     storage.save(hmap_key, buf, "image/jpeg")
     
     return {
-        "volume_grid": {"volume_m3": vol_grid, "volume_liter": vol_grid * 1000, "footprint_m2": foot_grid, "cell_m": cell_m},
-        "volume_convex_hull": {"volume_m3": vol_hull, "volume_liter": vol_hull * 1000, "footprint_m2": foot_hull},
+        "volume_grid": {"volume_m3": vol_grid, "volume_liter": vol_grid * 1000, "footprint_m2": foot_grid, "cell_m": cell_m} if grid_available else None,
+        "volume_convex_hull": {"volume_m3": vol_hull, "volume_liter": vol_hull * 1000, "footprint_m2": foot_hull} if vol_hull is not None else None,
         "instances": inst_results,
         "volume_npz_key": vol_key,
         "volume_heatmap_key": hmap_key,
@@ -240,7 +243,7 @@ def build_job_summary(
         "waste_detected": bool(mask.any()),
         "total_instances": len(instances),
         "total_waste_pixels": int(mask.sum()),
-        "waste_fraction_pct": round(100 * mask.mean(), 2),
+        "waste_fraction_pct": round(float(100 * mask.mean()), 2),
         "volume": {
             "method_grid": volume_results["volume_grid"],
             "method_convex_hull": volume_results["volume_convex_hull"],

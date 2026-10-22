@@ -10,13 +10,13 @@ from api.core.config import settings
 class CaptureCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, validate_default=True)
 
-    chessboard_cols: int = Field(settings.DEFAULT_CHESSBOARD_COLS, ge=2, le=30)
-    chessboard_rows: int = Field(settings.DEFAULT_CHESSBOARD_ROWS, ge=2, le=30)
+    chessboard_cols: int = Field(settings.DEFAULT_CHESSBOARD_COLS, ge=3, le=30)
+    chessboard_rows: int = Field(settings.DEFAULT_CHESSBOARD_ROWS, ge=3, le=30)
     square_m: float = Field(settings.DEFAULT_SQUARE_M, gt=0, le=1, description="Chessboard square side in meters")
     interval_sec: float = Field(2, ge=1, le=60)
-    target_images: int = Field(20, ge=1, le=100, description="Stored frames, not quality-selected images in phase 2")
+    target_images: int = Field(20, ge=1, le=100, description="Accepted chessboard frames for new sessions")
     max_duration_sec: int = Field(300, ge=1, le=900, description="Wall-clock limit from session creation, including queue time")
-    auto_calibrate: Literal[False] = Field(False, description="Automatic computation is not available until phase 3")
+    auto_calibrate: bool = False
 
 
 class CaptureResponse(BaseModel):
@@ -31,7 +31,17 @@ class CaptureResponse(BaseModel):
     interval_sec: float
     target_images: int
     max_duration_sec: int
-    auto_calibrate: Literal[False] = False
+    auto_calibrate: bool = False
+    selection_version: int = 0
+    accepted: int = 0
+    rejected: int = 0
+    rejection_counts: dict[str, int] = Field(default_factory=dict)
+    compute_status: str = "none"
+    compute_error_code: str | None = None
+    compute_requested_at: datetime | None = None
+    compute_started_at: datetime | None = None
+    compute_completed_at: datetime | None = None
+    result_calibration_id: UUID | None = None
     attempted: int
     captured: int
     failed_attempts: int
@@ -55,6 +65,11 @@ class CaptureImageResponse(BaseModel):
     size_bytes: int
     captured_at: datetime
     download_url: str
+    quality_status: str = "unassessed"
+    rejection_reason: str | None = None
+    sharpness: float | None = None
+    corners: list[list[float]] | None = None
+    preview_url: str | None = None
 
 
 class CaptureImageList(BaseModel):

@@ -1,7 +1,14 @@
 """Unit tests for ground model geometry (pure functions, no database)."""
+import asyncio
+from uuid import uuid4
+
+import cv2
 import numpy as np
 import pytest
 
+from api.core.storage import LocalStorage
+from api.models.orm import Calibration, Camera, GroundModel
+from api.services import ground_model_service as service
 from api.services.ground_model_service import (
     compute_bev,
     compute_ground_model,
@@ -99,3 +106,25 @@ class TestComputeBEV:
             image, empty_mask, gm_dict, ppm=100, margin_m=0.5
         )
         assert bev_img.shape[2] == 3
+
+
+def test_bev_preview_encodes_images_with_persisted_matrices(monkeypatch, tmp_path):
+    storage = LocalStorage(tmp_path / "artifacts")
+    monkeypatch.setattr(service, "get_storage", lambda: storage)
+    camera = Camera(id=uuid4())
+    calibration = Calibration(k_matrix=np.eye(3).tolist())
+    ground = GroundModel(H_i2w=[[.01, 0, 0], [0, .01, 0], [0, 0, 1]],
+                         H_w2i=[[100, 0, 0], [0, 100, 0], [0, 0, 1]],
+                         R_matrix=np.eye(3).tolist(), t_vector=[0, 0, 0],
+                         bev_ppm=20, bev_margin_m=.1)
+    image_path = tmp_path / "undistorted.jpg"
+    assert cv2.imwrite(str(image_path), np.full((100, 100, 3), 80, np.uint8))
+    preview = asyncio.run(service.generate_bev_preview(None, camera, calibration, ground, str(image_path)))
+    assert preview["bev_info"]["ppm"] == 20
+    for field in ("bev_image_url", "bev_mask_url", "bev_overlay_url"):
+        key = preview[field].split("/files/", 1)[-1]
+        with storage.get(key) as stream:
+            content = stream.read()
+        assert content.startswith(b"\xff\xd8")
+        decoded = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
+        assert decoded.shape[:2] == (preview["bev_info"]["height_px"], preview["bev_info"]["width_px"])

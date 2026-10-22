@@ -150,6 +150,36 @@ services:
       retries: 3
       start_period: 15s
 
+  calibration-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: waste-calibration-worker
+    command: celery -A api.workers.celery_app worker -Q calibration --loglevel=info --concurrency=1 --hostname=calibration@%h
+    volumes:
+      - ./api:/app/api
+      - artifacts:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://waste:waste@postgres/waste_db
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - STORAGE_LOCAL_ROOT=/app/storage
+      - PYTHONPATH=/app
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A api.workers.celery_app inspect ping -d calibration@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
   flower:
     build:
       context: .

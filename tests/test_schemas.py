@@ -117,3 +117,8 @@ class TestCalibrationSchema:
     def test_calibration_invalid_square_m(self):
         with pytest.raises(ValidationError):
             CalibrationBase(square_m=2.0)  # must be <= 1.0
+
+    @pytest.mark.parametrize("values", [{"chessboard_rows": 2}, {"chessboard_cols": 31}, {"alpha": float("nan")}])
+    def test_calibration_bounds_match_upload_route(self, values):
+        with pytest.raises(ValidationError):
+            CalibrationBase(**values)

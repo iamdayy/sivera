@@ -12,6 +12,7 @@ from sqlalchemy import select, update
 from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import Camera, Calibration, GroundModel, DepthScale
+from api.services.image_service import encode_image
 
 # Lazy model cache: loads each YOLO depth model once per process
 _depth_model_cache: dict = {}
@@ -246,14 +247,14 @@ async def run_depth_pipeline(
         imgsz=settings.DEFAULT_DEPTH_IMGSZ,
         device="cpu"
     )
+    if depth_raw.shape != image.shape[:2] or not np.isfinite(depth_raw).all():
+        raise ValueError("prediction_invalid_depth")
     
     # Save depth raw visualization
     depth_raw_vis = depth_colormap(depth_raw)
     raw_key = generate_storage_key(str(camera.id), job_id, "depth_raw_vis", "jpg")
     import io
-    buf = io.BytesIO()
-    cv2.imwrite(buf, depth_raw_vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    buf.seek(0)
+    buf = io.BytesIO(encode_image(depth_raw_vis))
     storage.save(raw_key, buf, "image/jpeg")
     
     # 2. Apply scale
@@ -265,9 +266,7 @@ async def run_depth_pipeline(
     # Save depth scaled visualization
     depth_scaled_vis = depth_colormap(depth_m)
     scaled_key = generate_storage_key(str(camera.id), job_id, "depth_scaled_vis", "jpg")
-    buf = io.BytesIO()
-    cv2.imwrite(buf, depth_scaled_vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    buf.seek(0)
+    buf = io.BytesIO(encode_image(depth_scaled_vis))
     storage.save(scaled_key, buf, "image/jpeg")
     
     # 3. Lift to ground
@@ -288,17 +287,13 @@ async def run_depth_pipeline(
     hmap = height_heatmap(X, Y, H, uv, image.shape)
     overlay = cv2.addWeighted(image, 0.6, hmap, 0.7, 0)
     hmap_key = generate_storage_key(str(camera.id), job_id, "height_map", "jpg")
-    buf = io.BytesIO()
-    cv2.imwrite(buf, overlay, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    buf.seek(0)
+    buf = io.BytesIO(encode_image(overlay))
     storage.save(hmap_key, buf, "image/jpeg")
     
     # 5. Depth masked visualization
     depth_masked_vis = depth_colormap(depth_m, mask)
     masked_key = generate_storage_key(str(camera.id), job_id, "depth_masked", "jpg")
-    buf = io.BytesIO()
-    cv2.imwrite(buf, depth_masked_vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    buf.seek(0)
+    buf = io.BytesIO(encode_image(depth_masked_vis))
     storage.save(masked_key, buf, "image/jpeg")
     
     return {
@@ -314,9 +309,9 @@ async def run_depth_pipeline(
             "mean": float(H.mean()),
             "median": float(np.median(H)),
             "std": float(H.std()),
-        },
+        } if len(H) else None,
         "footprint": {
             "x_min": float(X.min()), "x_max": float(X.max()),
             "y_min": float(Y.min()), "y_max": float(Y.max()),
-        },
+        } if len(X) else None,
     }

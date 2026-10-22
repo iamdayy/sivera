@@ -9,6 +9,7 @@ celery_app = Celery(
     include=[
         "api.workers.tasks.predict_task",
         "api.workers.tasks.capture_task",
+        "api.workers.tasks.calibration_task",
     ],
 )
 
@@ -25,7 +26,10 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     result_expires=3600,
     task_default_queue="prediction",
-    task_routes={"api.workers.tasks.capture_task.run_capture_task": {"queue": "capture"}},
+    task_routes={
+        "api.workers.tasks.capture_task.run_capture_task": {"queue": "capture"},
+        "api.workers.tasks.calibration_task.run_capture_calibration_task": {"queue": "calibration"},
+    },
     broker_connection_timeout=3,
     broker_transport_options={"socket_timeout": 3, "socket_connect_timeout": 3, "visibility_timeout": 1800},
     beat_schedule={},  # Periodic tasks will be added later

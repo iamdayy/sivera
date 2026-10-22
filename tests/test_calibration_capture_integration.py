@@ -97,6 +97,7 @@ def test_real_capture_routes_runner_stop_and_recovery(monkeypatch, tmp_path):
         MEDIAMTX_RTSP_PORT=int(os.environ.get("SIVERA_TEST_MEDIAMTX_RTSP_PORT", "8554")),
         MEDIAMTX_API_PASSWORD=os.environ["SIVERA_TEST_MEDIAMTX_API_PASSWORD"],
         MEDIAMTX_READ_PASSWORD=os.environ["SIVERA_TEST_MEDIAMTX_READ_PASSWORD"], MEDIAMTX_ALLOWED_RTSP_HOSTS="127.0.0.1",
+        SECRET_KEY=settings.SECRET_KEY,
     )
     async def check():
         engine = create_async_engine(url)
@@ -137,6 +138,9 @@ def test_real_capture_routes_runner_stop_and_recovery(monkeypatch, tmp_path):
                 responses = await asyncio.gather(*[client.post(captures, json={"target_images": 2, "interval_sec": 1}) for _ in range(2)])
                 assert sorted(r.status_code for r in responses) == [202, 409]
                 session_id = next(r.json()["session_id"] for r in responses if r.status_code == 202)
+                # Existing phase-2 sessions keep stored-frame targeting after migration.
+                async with context() as db:
+                    await db.execute(update(CalibrationCaptureSession).where(CalibrationCaptureSession.id == UUID(session_id)).values(selection_version=0))
                 workers = [CaptureRunner(UUID(session_id), context, storage, config) for _ in range(2)]
                 await asyncio.gather(*(worker.run() for worker in workers))
                 response = await client.get(captures + "/" + session_id)
