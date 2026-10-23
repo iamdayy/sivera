@@ -33,6 +33,7 @@ async def create_camera(
     """Register a new camera."""
     if api_key.camera_id is not None:
         raise HTTPException(status_code=403, detail="Camera-bound keys cannot register cameras")
+    
     camera = Camera(
         name=camera_data.name,
         rtsp_url=camera_data.rtsp_url,
@@ -74,6 +75,8 @@ async def list_cameras(
     api_key: ApiKey = Depends(require_scope("camera:read")),
 ):
     """List cameras with pagination."""
+    total = 0
+    items: List[CameraResponse] = []
     query = select(Camera)
     if api_key.camera_id is not None:
         query = query.where(Camera.id == api_key.camera_id)
@@ -85,15 +88,19 @@ async def list_cameras(
     # Total count
     total_result = await db.execute(select(func.count()).select_from(query.subquery()))
     total = total_result.scalar()
+    if total == None or total == 0:
+        return CameraListResponse(items=[], total=0, page=page, page_size=page_size, total_pages=0)
     
     # Paginated results
     query = query.order_by(Camera.created_at.desc())
     query = query.offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
     cameras = result.scalars().all()
+    items = [CameraResponse.from_orm_with_geo(c) for c in cameras]
+    print("RTPS from items:", [item.rtsp_url for item in items])
     
     return CameraListResponse(
-        items=[CameraResponse.from_orm_with_geo(c) for c in cameras],
+        items=items,
         total=total,
         page=page,
         page_size=page_size,
