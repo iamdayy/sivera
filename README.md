@@ -177,7 +177,7 @@ Akses admin tanpa login hanya diizinkan dari localhost **container**, untuk heal
 #### Mengaktifkan integrasi
 
 1. Isi `.env` dengan dua password acak yang berbeda untuk `MEDIAMTX_API_PASSWORD` dan `MEDIAMTX_READ_PASSWORD`. Compose menolak password kosong. Gunakan secret manager untuk produksi.
-2. Set `MEDIAMTX_ENABLED=true`, `MEDIAMTX_ALLOWED_RTSP_HOSTS` berisi hostname/IP kamera secara persis (dipisahkan koma), dan `MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS` berisi IP LAN/domain publik MediaMTX yang dapat dijangkau browser. Default `127.0.0.1` hanya untuk browser pada host yang sama.
+2. Set `MEDIAMTX_ENABLED=true` dan `MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS` berisi IP LAN/domain publik MediaMTX yang dapat dijangkau browser. Default `127.0.0.1` hanya untuk browser pada host yang sama. Pengaturan `MEDIAMTX_ALLOWED_RTSP_HOSTS` tidak lagi dipakai; batasi egress jaringan kamera di lapisan deployment (firewall/security group).
 3. Set `CORS_ORIGINS` ke origin dashboard. Produksi harus memakai HTTPS pada FastAPI/reverse proxy. UDP `8189` tetap menuju MediaMTX; signaling proxy tidak merelay media. Bila UDP tidak bisa dijangkau, konfigurasi TCP/TURN sesuai jaringan diperlukan.
 4. Jalankan migrasi **sebelum** API baru, lalu restart MediaMTX dan API:
 

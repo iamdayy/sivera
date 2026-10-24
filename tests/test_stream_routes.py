@@ -97,10 +97,10 @@ def test_desired_state_committed_when_mediamtx_down(setup):
 
 
 def test_enable_validates_source(setup):
-    setup.camera.rtsp_url = "rtsp://evil.local/live"
+    setup.camera.rtsp_url = "http://invalid-scheme.local/live"
     response = setup.client.patch(setup.url, json={"enabled": True})
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "rtsp_host_not_allowed"
+    assert response.json()["detail"]["code"] == "invalid_rtsp_source"
     setup.db.commit.assert_not_awaited()
 
 
@@ -224,7 +224,7 @@ def test_source_change_commits_then_reconciles(setup):
     setup.db.commit.assert_awaited_once()
     cameras.reconcile_streams.assert_awaited_once()
     setup.db.commit.reset_mock()
-    response = setup.client.patch(url, json={"rtsp_url": "rtsp://not-allowed.local/live"})
+    response = setup.client.patch(url, json={"rtsp_url": "http://invalid-scheme.local/live"})
     assert response.status_code == 422
     setup.db.commit.assert_not_awaited()
 

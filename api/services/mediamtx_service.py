@@ -55,9 +55,6 @@ def validate_rtsp_source(source: str, config: Settings = settings) -> None:
         or re.search(r"%(?![0-9a-fA-F]{2})", source)
     ):
         raise MediaMTXError("invalid_rtsp_source", 422)
-    allowed = {item.strip().lower() for item in config.MEDIAMTX_ALLOWED_RTSP_HOSTS.split(",") if item.strip()}
-    if host not in allowed:
-        raise MediaMTXError("rtsp_host_not_allowed", 422)
 
 
 def desired_path(source: str) -> dict:

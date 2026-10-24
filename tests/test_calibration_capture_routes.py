@@ -103,10 +103,10 @@ def test_start_missing_camera_and_invalid_source(setup):
     setup.db.execute.return_value.one_or_none = lambda: None
     assert setup.client.post(setup.url, json={}).status_code == 404
     setup.db.execute.return_value.one_or_none = lambda: setup.camera
-    setup.camera.rtsp_url = "rtsp://disallowed.local/live"
+    setup.camera.rtsp_url = "http://invalid-scheme.local/live"
     response = setup.client.post(setup.url, json={})
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "rtsp_host_not_allowed"
+    assert response.json()["detail"]["code"] == "invalid_rtsp_source"
     routes.dispatch_capture.assert_not_awaited()
 
 

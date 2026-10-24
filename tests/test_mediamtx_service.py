@@ -27,7 +27,7 @@ def anyio_backend():
 
 
 @pytest.mark.parametrize("source", [
-    "http://camera.local/live", "rtsp://evil.local/live", "rtsp://camera.local:0/live",
+    "http://camera.local/live", "rtsp://camera.local:0/live",
     "rtsp://camera.local:bad/live", "rtsp://camera.local/live#fragment",
     "rtsp://camera.local/live\n", "rtsp://camera.local/$MTX_QUERY", "rtsp:///live",
     "rtsp://user@camera.local/live", "rtsp://:password@camera.local/live",
@@ -40,15 +40,9 @@ def test_source_rejected_without_leaking_credentials(source, config):
     assert source not in str(exc.value)
 
 
-@pytest.mark.parametrize("source", ["rtsp://u:p@camera.local/live", "rtsps://192.168.1.10:322/live"])
-def test_source_allowlist(source, config):
+@pytest.mark.parametrize("source", ["rtsp://u:p@camera.local/live", "rtsps://192.168.1.10:322/live", "rtsp://evil.local/live"])
+def test_valid_rtsp_sources(source, config):
     validate_rtsp_source(source, config)
-
-
-def test_empty_allowlist_denies_all_sources(config):
-    config.MEDIAMTX_ALLOWED_RTSP_HOSTS = " , "
-    with pytest.raises(MediaMTXError, match="^rtsp_host_not_allowed$"):
-        validate_rtsp_source("rtsp://192.0.2.1/live", config)
 
 
 @pytest.mark.anyio
