@@ -124,3 +124,45 @@ Do not claim tests passed unless they were run. If GPU, model weights, or extern
 5. Run applicable checks and inspect OpenAPI/output behavior.
 6. Update `DESIGN.md`, this file, relevant README sections, and the OpenAPI snapshot when architecture/behavior/contracts change. Keep frontend implementation in `../sivera-dashboard`; integration planning belongs in its `.agents/plan/` without overwriting historical plans.
 7. Summarize changed files, checks run, and remaining risks.
+
+## Measurement-logic audit and correctness gates
+
+Separate **confirmed code defects** from **assumptions that require evidence**. Do not claim measurement accuracy from unit labels, successful inference, or passing mocked tests.
+
+### Confirmed cross-repository issue
+
+- In the dashboard repository, `src/services/readiness.ts` checks an `activeGroundModelId` that is initialized to null and never assigned. Coordinate with `iamdayy/sivera-dashboard` to fix it and add regression tests. Keep backend prerequisite behavior authoritative and consistent.
+
+### Depth semantics and calibration
+
+1. Verify the exact depth-model output convention from the selected model's implementation/docs/tests: camera optical-axis Z-depth versus Euclidean/radial range versus relative depth. “Meters” alone does not establish which convention is returned.
+2. The lifting equations `X=(u-cx)D/fx`, `Y=(v-cy)D/fy`, `Z=D` require optical-axis Z-depth and consistent undistorted pixel coordinates/intrinsics. If the model returns radial range, convert the ray/range correctly; if it returns relative depth, metric calibration is required before reporting metric volume.
+3. Trace depth-scale calibration end to end: selected ground-model ID, model path/identity/version, input image preparation, calibration samples, fitted scale/bias, persisted diagnostics, and inference-time selection. Ensure the exact model used to fit the scale is the model used for prediction; model replacement/version changes must invalidate or revalidate the scale.
+4. Do not apply an extra scale/bias correction merely because it is available. Verify whether the model already provides metric depth, whether the calibration is needed, and whether the fitted correction improves held-out physical measurements.
+5. Add tests for coordinate convention, units, finite/positive values, out-of-range clipping, mismatched model identity, and calibration compatibility. Use known synthetic geometry plus measured physical reference cases.
+
+### Segmentation contract
+
+- Confirm whether the configured model returns instance masks or semantic class maps. The consumer contract must match the actual output; an instance API such as `r.masks.xy` is not interchangeable with a semantic label map.
+- Verify class-ID/name mapping against the model's trained labels. Define operational meanings for categories such as `Sampah_Berserakan` and `Sampah_Overload`; if they describe scene states rather than mutually exclusive waste regions, avoid double-counting overlapping masks.
+- Test morphology and small-component filtering against representative thin, small, occluded, and low-contrast waste. Record removed-pixel/component counts in diagnostics where useful; thresholds are heuristics, not universal truth.
+
+### Volume geometry and validation
+
+- Document the grid method's cell size, representative height statistic, minimum points per cell, treatment of holes/empty cells, and partial boundary cells. Grid volume is a discretized estimate whose bias can vary with point density and grid resolution.
+- Test sensitivity at multiple grid sizes (for example 0.025 m, 0.05 m, 0.10 m) and min-point thresholds. Compare against known-volume/physical reference measurements; report absolute and relative error and include multiple pile shapes.
+- The convex-hull implementation that multiplies a 2D footprint hull area by a representative height is a footprint-times-height proxy, not a full 3D convex hull. Name/document it honestly and avoid presenting it as a physically equivalent alternative without validation.
+- Handle empty masks, sparse point clouds, degenerate footprints, invalid depth, and missing cells explicitly. Null/unavailable must not be silently coerced to zero. Bound memory and computation for high-resolution images.
+
+### Asynchronous job correctness
+
+- Preserve persisted job transitions and completion fencing. Add/retain tests for duplicate task delivery, worker exception, queue/broker failure, stale job timeout, retry behavior, and late worker completion after a job has become terminal. A late worker must not overwrite a terminal status or publish partial artifacts as complete.
+- Keep capture, calibration computation, and prediction states separate where they represent different work. Do not infer percentage progress or measured duration from a fixed advisory duration.
+- Verify artifacts and database outputs are committed consistently; failed jobs should expose stable safe error codes and should not leave result records that appear successful.
+
+### Evidence and release discipline
+
+- Label each finding as a reproduced defect, a verified invariant, or an unverified risk. Inspect current code and tests before editing because documentation may be stale.
+- Validate with unit tests, geometry tests, API tests, and disposable integration tests. Separate real inference/hardware checks from mocked model tests.
+- For volume claims, use a held-out physical reference dataset; record units, measurement procedure, method parameters, and errors. Do not claim accuracy without that validation.
+- Coordinate API/schema changes with `iamdayy/sivera-dashboard`; update the OpenAPI contract and frontend adapters/tests together.
