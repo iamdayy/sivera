@@ -117,9 +117,13 @@ def test_bev_preview_encodes_images_with_persisted_matrices(monkeypatch, tmp_pat
                          H_w2i=[[100, 0, 0], [0, 100, 0], [0, 0, 1]],
                          R_matrix=np.eye(3).tolist(), t_vector=[0, 0, 0],
                          bev_ppm=20, bev_margin_m=.1)
-    image_path = tmp_path / "undistorted.jpg"
-    assert cv2.imwrite(str(image_path), np.full((100, 100, 3), 80, np.uint8))
-    preview = asyncio.run(service.generate_bev_preview(None, camera, calibration, ground, str(image_path)))
+    # Save test image to storage and use storage key
+    test_image = np.full((100, 100, 3), 80, np.uint8)
+    test_key = "cameras/test/bev_test.jpg"
+    import io
+    success, buf = cv2.imencode(".jpg", test_image)
+    storage.save(test_key, io.BytesIO(buf.tobytes()), "image/jpeg")
+    preview = asyncio.run(service.generate_bev_preview(None, camera, calibration, ground, test_key))
     assert preview["bev_info"]["ppm"] == 20
     for field in ("bev_image_url", "bev_mask_url", "bev_overlay_url"):
         key = preview[field].split("/files/", 1)[-1]

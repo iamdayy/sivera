@@ -2443,6 +2443,359 @@
         ]
       }
     },
+    "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales": {
+      "post": {
+        "tags": [
+          "depth-scales"
+        ],
+        "summary": "Create Depth Scale",
+        "description": "Create depth scale from test image with known distance measurements.\n\nComputes scale and offset by comparing YOLO depth output with known distances.\nDeactivates existing depth scales for this ground_model.",
+        "operationId": "create_depth_scale_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DepthScaleCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepthScaleResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "depth-scales"
+        ],
+        "summary": "List Depth Scales",
+        "description": "List all depth scales for a ground model.",
+        "operationId": "list_depth_scales_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepthScaleListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales/active": {
+      "get": {
+        "tags": [
+          "depth-scales"
+        ],
+        "summary": "Get Active Depth Scale",
+        "description": "Get active depth scale for a ground model.",
+        "operationId": "get_active_depth_scale_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_active_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepthScaleResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales/{depth_scale_id}": {
+      "get": {
+        "tags": [
+          "depth-scales"
+        ],
+        "summary": "Get Depth Scale",
+        "description": "Get specific depth scale.",
+        "operationId": "get_depth_scale_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales__depth_scale_id__get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          },
+          {
+            "name": "depth_scale_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Depth Scale Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepthScaleResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales/{depth_scale_id}/activate": {
+      "post": {
+        "tags": [
+          "depth-scales"
+        ],
+        "summary": "Activate Depth Scale",
+        "description": "Set a depth scale as active (deactivates others for this ground_model).",
+        "operationId": "activate_depth_scale_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales__depth_scale_id__activate_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          },
+          {
+            "name": "depth_scale_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Depth Scale Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepthScaleResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/cameras/{camera_id}/predict": {
       "post": {
         "tags": [
@@ -4538,6 +4891,176 @@
           "last_capture_at"
         ],
         "title": "CaptureResponse"
+      },
+      "DepthScaleCreate": {
+        "properties": {
+          "test_image": {
+            "type": "string",
+            "title": "Test Image",
+            "description": "Storage key of test image (uploaded via /files or calibration capture)"
+          },
+          "depth_model": {
+            "type": "string",
+            "title": "Depth Model",
+            "description": "Depth model name used (e.g., 'yolo26n-depth.pt')"
+          },
+          "known_distances": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Known Distances",
+            "description": "List of {x, y, distance_m} for known distance points in image coordinates (undistorted)"
+          },
+          "clip_min_m": {
+            "type": "number",
+            "maximum": 10.0,
+            "minimum": 0.01,
+            "title": "Clip Min M",
+            "default": 0.1
+          },
+          "clip_max_m": {
+            "type": "number",
+            "maximum": 200.0,
+            "minimum": 5.0,
+            "title": "Clip Max M",
+            "default": 50.0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "test_image",
+          "depth_model",
+          "known_distances"
+        ],
+        "title": "DepthScaleCreate",
+        "description": "Create depth scale from a test image with known distance measurements."
+      },
+      "DepthScaleListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DepthScaleResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "DepthScaleListResponse"
+      },
+      "DepthScaleResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "camera_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Camera Id"
+          },
+          "ground_model_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Ground Model Id"
+          },
+          "depth_model": {
+            "type": "string",
+            "title": "Depth Model"
+          },
+          "scale_s": {
+            "type": "number",
+            "title": "Scale S",
+            "description": "Scale factor: metric_depth = raw_depth * scale_s + offset_b"
+          },
+          "offset_b": {
+            "type": "number",
+            "title": "Offset B",
+            "description": "Bias/offset in meters"
+          },
+          "residuals": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Residuals",
+            "description": "Per-point residuals in meters"
+          },
+          "mean_residual_m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mean Residual M",
+            "description": "Mean absolute residual in meters"
+          },
+          "max_residual_m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Residual M",
+            "description": "Max absolute residual in meters"
+          },
+          "clip_min_m": {
+            "type": "number",
+            "title": "Clip Min M"
+          },
+          "clip_max_m": {
+            "type": "number",
+            "title": "Clip Max M"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "camera_id",
+          "ground_model_id",
+          "depth_model",
+          "scale_s",
+          "offset_b",
+          "clip_min_m",
+          "clip_max_m",
+          "is_active",
+          "created_at"
+        ],
+        "title": "DepthScaleResponse"
       },
       "DetectedInstanceResponse": {
         "properties": {

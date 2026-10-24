@@ -188,6 +188,7 @@ A backend change is complete when it preserves or documents API compatibility, i
 | Capture computation | `POST /calibration-captures/{session_id}/compute` | 202; poll `compute_status` on the capture status endpoint. Terminal capture and enough selected views required. Fetch resulting calibration, inspect, then explicitly activate. |
 | Snapshot | `POST /snapshots`, `GET /snapshots/latest`, `GET /snapshots/{snapshot_id}/image` | Synchronous 201 capture; latest GET never captures. Default age 30 seconds, range 1..300. Authenticated JPEG download is separate from metadata. |
 | Prediction | `POST/GET /predict`, job GET and `/outputs`, `/outputs/{output_type}`, `/instances`, `/volumes` | Multipart POST returns 202 and `job_id`; GET job reports `pending/processing/done/failed`. Output selection affects registered downloads, not result summaries. |
+| Depth scale | `POST/GET /ground-models/{ground_model_id}/depth-scales`, `GET .../active`, `GET /{depth_scale_id}`, `POST /{depth_scale_id}/activate` | POST creates scale from test image with known distances (runs YOLO depth); deactivates others. GET lists/reads. POST activate sets active. Required for metric volume estimation. |
 
 All camera/job/session/image/snapshot IDs are UUIDs. Capture uses `session_id` in responses; prediction submission uses `job_id`, while persisted job reads use `id`. Stream desired `enabled`, runtime `status`, and `synced` are distinct. `idle` is not proof the camera is online or offline; `online` is not proof a browser has decoded video.
 

@@ -10,13 +10,14 @@ from sqlalchemy.orm import selectinload
 from api.core.config import settings, STORAGE_ROOT
 from api.core.database import get_db
 from api.core.security import verify_api_key, require_scope
-from api.models.orm import Camera, Calibration, GroundReference, GroundModel
+from api.models.orm import Camera, Calibration, GroundReference, GroundModel, DepthScale
 from api.schemas.ground_ref import (
     GroundReferenceCreate, GroundReferenceResponse, GroundReferenceListResponse,
-    GroundModelResponse, BEVPreviewResponse
+    GroundModelResponse, BEVPreviewResponse,
+    DepthScaleCreate, DepthScaleResponse, DepthScaleListResponse
 )
 from api.services.ground_model_service import (
-    save_ground_reference, create_ground_model_from_ref, generate_bev_preview
+    save_ground_reference, create_ground_model_from_ref, generate_bev_preview, compute_depth_scale
 )
 from api.core.storage import get_storage
 
@@ -354,3 +355,203 @@ async def get_bev_preview(
         return BEVPreviewResponse(**preview)
     except Exception as e:
         raise HTTPException(status_code=500, detail="BEV preview generation failed. See server logs for details.")
+
+
+# Depth Scale routes
+depth_scale_router = APIRouter(tags=["depth-scales"])
+
+
+@depth_scale_router.post("", response_model=DepthScaleResponse, status_code=status.HTTP_201_CREATED)
+async def create_depth_scale(
+    camera_id: UUID,
+    ground_model_id: UUID,
+    body: DepthScaleCreate,
+    db: AsyncSession = Depends(get_db),
+    api_key: str = Depends(require_scope("ground_ref:write")),
+):
+    """Create depth scale from test image with known distance measurements.
+    
+    Computes scale and offset by comparing YOLO depth output with known distances.
+    Deactivates existing depth scales for this ground_model.
+    """
+    # Verify camera
+    camera_result = await db.execute(select(Camera).where(Camera.id == camera_id))
+    camera = camera_result.scalar_one_or_none()
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    
+    # Get ground model
+    gm_result = await db.execute(
+        select(GroundModel)
+        .where(GroundModel.id == ground_model_id, GroundModel.camera_id == camera_id)
+    )
+    ground_model = gm_result.scalar_one_or_none()
+    if not ground_model:
+        raise HTTPException(status_code=404, detail="Ground model not found")
+    
+    # Get calibration
+    calib_result = await db.execute(
+        select(Calibration).where(Calibration.id == ground_model.calibration_id)
+    )
+    calibration = calib_result.scalar_one_or_none()
+    if not calibration:
+        raise HTTPException(status_code=404, detail="Calibration not found")
+    
+    # Validate test image path
+    def _validate_storage_path(p: str, label: str) -> str:
+        try:
+            root = STORAGE_ROOT.resolve()
+            candidate = Path(p).resolve()
+            candidate.relative_to(root)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail=f"{label} must be a path under the storage root")
+        if not candidate.exists():
+            raise HTTPException(status_code=400, detail=f"{label} not found")
+        return str(candidate)
+    
+    test_image_key = _validate_storage_path(body.test_image, "test_image")
+    
+    # Compute depth scale
+    try:
+        result = await compute_depth_scale(
+            db=db,
+            camera=camera,
+            calibration=calibration,
+            ground_model=ground_model,
+            test_image_key=test_image_key,
+            depth_model=body.depth_model,
+            known_distances=body.known_distances,
+            clip_min_m=body.clip_min_m,
+            clip_max_m=body.clip_max_m,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"code": "depth_scale_computation_failed", "message": str(exc)}) from None
+    
+    # Deactivate existing depth scales for this ground_model
+    await db.execute(
+        update(DepthScale)
+        .where(DepthScale.ground_model_id == ground_model_id)
+        .values(is_active=False)
+    )
+    
+    # Create new depth scale
+    depth_scale = DepthScale(
+        camera_id=camera_id,
+        ground_model_id=ground_model_id,
+        depth_model=result["depth_model"],
+        scale_s=result["scale_s"],
+        offset_b=result["offset_b"],
+        residuals=result["residuals"],
+        mean_residual_m=result["mean_residual_m"],
+        max_residual_m=result["max_residual_m"],
+        clip_min_m=result["clip_min_m"],
+        clip_max_m=result["clip_max_m"],
+        is_active=True,
+    )
+    db.add(depth_scale)
+    await db.commit()
+    await db.refresh(depth_scale)
+    
+    return DepthScaleResponse.model_validate(depth_scale)
+
+
+@depth_scale_router.get("", response_model=DepthScaleListResponse)
+async def list_depth_scales(
+    camera_id: UUID,
+    ground_model_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    api_key: str = Depends(require_scope("ground_ref:read")),
+):
+    """List all depth scales for a ground model."""
+    result = await db.execute(
+        select(DepthScale)
+        .where(DepthScale.ground_model_id == ground_model_id, DepthScale.camera_id == camera_id)
+        .order_by(DepthScale.created_at.desc())
+    )
+    scales = result.scalars().all()
+    return DepthScaleListResponse(
+        items=[DepthScaleResponse.model_validate(s) for s in scales],
+        total=len(scales),
+    )
+
+
+@depth_scale_router.get("/active", response_model=DepthScaleResponse)
+async def get_active_depth_scale(
+    camera_id: UUID,
+    ground_model_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    api_key: str = Depends(require_scope("ground_ref:read")),
+):
+    """Get active depth scale for a ground model."""
+    result = await db.execute(
+        select(DepthScale)
+        .where(
+            DepthScale.ground_model_id == ground_model_id,
+            DepthScale.camera_id == camera_id,
+            DepthScale.is_active == True
+        )
+        .order_by(DepthScale.created_at.desc())
+    )
+    depth_scale = result.scalar_one_or_none()
+    if not depth_scale:
+        raise HTTPException(status_code=404, detail="No active depth scale for this ground model")
+    return DepthScaleResponse.model_validate(depth_scale)
+
+
+@depth_scale_router.get("/{depth_scale_id}", response_model=DepthScaleResponse)
+async def get_depth_scale(
+    camera_id: UUID,
+    ground_model_id: UUID,
+    depth_scale_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    api_key: str = Depends(require_scope("ground_ref:read")),
+):
+    """Get specific depth scale."""
+    result = await db.execute(
+        select(DepthScale)
+        .where(
+            DepthScale.id == depth_scale_id,
+            DepthScale.ground_model_id == ground_model_id,
+            DepthScale.camera_id == camera_id
+        )
+    )
+    depth_scale = result.scalar_one_or_none()
+    if not depth_scale:
+        raise HTTPException(status_code=404, detail="Depth scale not found")
+    return DepthScaleResponse.model_validate(depth_scale)
+
+
+@depth_scale_router.post("/{depth_scale_id}/activate", response_model=DepthScaleResponse)
+async def activate_depth_scale(
+    camera_id: UUID,
+    ground_model_id: UUID,
+    depth_scale_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    api_key: str = Depends(require_scope("ground_ref:write")),
+):
+    """Set a depth scale as active (deactivates others for this ground_model)."""
+    result = await db.execute(
+        select(DepthScale)
+        .where(
+            DepthScale.id == depth_scale_id,
+            DepthScale.ground_model_id == ground_model_id,
+            DepthScale.camera_id == camera_id
+        )
+    )
+    depth_scale = result.scalar_one_or_none()
+    if not depth_scale:
+        raise HTTPException(status_code=404, detail="Depth scale not found for this ground model")
+    
+    # Deactivate all for this ground_model
+    await db.execute(
+        update(DepthScale)
+        .where(DepthScale.ground_model_id == ground_model_id)
+        .values(is_active=False)
+    )
+    
+    # Activate selected
+    depth_scale.is_active = True
+    await db.commit()
+    await db.refresh(depth_scale)
+    
+    return DepthScaleResponse.model_validate(depth_scale)

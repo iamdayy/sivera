@@ -223,6 +223,7 @@ app.include_router(calibrations.router, prefix="/api/v1/cameras/{camera_id}/cali
 app.include_router(calibration_captures.router, prefix="/api/v1/cameras/{camera_id}/calibration-captures")
 app.include_router(ground_refs.router, prefix="/api/v1/cameras/{camera_id}/ground-references")
 app.include_router(ground_refs.model_router, prefix="/api/v1/cameras/{camera_id}/ground-models")
+app.include_router(ground_refs.depth_scale_router, prefix="/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales")
 app.include_router(predictions.router, prefix="/api/v1/cameras/{camera_id}/predict")
 
 
