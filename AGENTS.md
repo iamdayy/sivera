@@ -166,3 +166,13 @@ Separate **confirmed code defects** from **assumptions that require evidence**. 
 - Validate with unit tests, geometry tests, API tests, and disposable integration tests. Separate real inference/hardware checks from mocked model tests.
 - For volume claims, use a held-out physical reference dataset; record units, measurement procedure, method parameters, and errors. Do not claim accuracy without that validation.
 - Coordinate API/schema changes with `iamdayy/sivera-dashboard`; update the OpenAPI contract and frontend adapters/tests together.
+
+
+## User identity, permissions, and organization scope
+
+- The current product scope is one organization. Do not introduce speculative multi-tenant tables, organization_id columns, tenant selectors, or tenant-aware API claims in this phase.
+- Inspect the actual auth dependencies and API contract before adding end-user login or account administration. An X-API-Key authenticates API access; it does not by itself provide user identity, sessions, invitations, or roles.
+- If end-user accounts are introduced, define a server-side principal and explicit permissions before exposing user-management or measurement actions. Enforce authorization in API/service layers, not only in the dashboard.
+- Proposed role semantics for product planning: administrator (manage access and allowed configuration), operator (run measurements and view permitted results), viewer (read-only results/history). Do not assume these roles exist until implemented and tested.
+- For supported user administration, validate role changes and activation/deactivation server-side, handle expired/invalid credentials and forbidden operations distinctly, and prevent removal/demotion of the last administrator where applicable.
+- Keep resource ownership and authorization checks centralized so future organization scoping can be introduced consistently. Before multi-organization support, define ownership and migration/backfill for cameras, calibrations, ground models, depth scales, prediction jobs, artifacts, and users; add tenant-scoped queries and cross-tenant denial tests.
