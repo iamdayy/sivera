@@ -226,3 +226,46 @@ The original `waste-postgres` remains stopped with its 5432 binding conflict unr
 - Creation releases database reads before inference, then locks camera followed by ground model and rechecks active compatibility. Creation and activation deactivate competing scales atomically under those locks. Activation rejects invalid saved fit diagnostics and unavailable model files. Historical duplicate active rows are read deterministically; public writes normalize the selected ground model without a destructive data migration. Pinned prediction jobs remain unchanged.
 - No ORM fields or migration are added; head remains `005_capture_quality_snapshots`. Images have a backend-controlled UUID namespace, not a new table. Access checks require the parent camera/ground model and ground scope, including generic `/files`. Files remain after parent deletion or partial upload; retention/physical cleanup remains an operator task.
 - Docker dependencies now explicitly install depth-capable Ultralytics 8.4.182, Torch 2.5.0+cpu/torchvision 0.20.0+cpu, aligned OpenCV wheels, and SciPy used by volume geometry. Model weights, deployment restarts, user databases, MediaMTX image/config, and dashboard source are not changed by this repair.
+
+## 18. Measurement correctness and validation requirements
+
+This section describes required verification, not a claim that every item is already implemented or physically validated.
+
+### Depth output and 3D lifting
+
+- Record the selected model artifact/version and its documented output convention. Metric units alone do not tell whether a pixel value represents camera-axis Z-depth, radial distance, or relative depth.
+- The current pinhole lifting form `X=(u-cx)D/fx`, `Y=(v-cy)D/fy`, `Z=D` is valid only for camera-axis Z-depth and matching undistorted image coordinates/intrinsics. If the model returns radial range, convert using the normalized camera ray; if relative depth, do not describe the output as metric without a validated metric scale.
+- Keep image preparation identical between scale fitting and prediction (including undistortion, image dimensions, channel order, and model preprocessing).
+- Bind every depth-scale fit to the exact depth model identity/version and ground model. Confirm at inference time that the same model is selected. Replacing weights or changing the output convention must invalidate or explicitly revalidate the scale.
+- Treat fitted scale/bias and residual thresholds as calibration diagnostics, not independent proof of physical accuracy. Evaluate on held-out measurements, not only the samples used to fit the transform.
+
+### Segmentation output contract
+
+- The segmentation adapter must explicitly support the configured model's real output type: instance masks versus semantic label map. Validate the adapter with a known image and known class IDs/names.
+- Define whether waste classes are mutually exclusive physical regions or scene-condition labels. If masks overlap or describe the same pile at different levels, deduplicate/union regions before volume aggregation to avoid double counting.
+- Validate morphology and component-size thresholds against small, thin, low-contrast, and partially occluded waste. Keep thresholds configurable only where justified and test their effect on retained area.
+
+### Volume methods
+
+- **Grid method:** define cell size, per-cell height statistic, minimum sample count, empty-cell/hole policy, and boundary-cell area policy. Test several resolutions (suggested starting points: 0.025 m, 0.05 m, and 0.10 m) and density thresholds. Quantify error against physical reference volumes.
+- **Footprint × height proxy:** if the implementation uses a 2D convex hull area multiplied by a median/representative height, name it as a footprint-height approximation. It is not a full 3D convex hull volume and should not be described as such.
+- Compare candidate methods using identical scenes and a defined physical ground-truth procedure. Report absolute error in `m³` and relative error in percent. Choose the primary display method only after validation on representative pile shapes and sizes.
+- Handle empty segmentation, sparse points, holes, degenerate hulls, non-finite depths, and clipped depths explicitly. Missing estimates must remain null/unavailable rather than becoming zero.
+- Bound memory and execution time at camera resolution; use spatial binning/vectorization where it preserves the method's defined semantics.
+
+### Job lifecycle and API-to-UI contract
+
+- Prediction state is persisted as `pending -> processing -> done/failed`. Completion must be fenced so a stale/late worker cannot overwrite a terminal state or publish partial outputs as complete.
+- Distinguish HTTP acceptance (202) from completed inference. The UI must poll the persisted job status; a fixed `estimated_duration_sec` is advisory, not actual progress or a service-level guarantee.
+- Keep error codes stable and actionable. The dashboard should show safe human-readable recovery guidance without exposing internal paths, stack traces, or credentials.
+- Keep the OpenAPI contract, backend schemas/routes/tests, and dashboard API adapters synchronized when changing readiness, depth-scale, prediction status, or output metadata.
+
+### Validation dataset and release gate
+
+Before claiming that volume estimation is accurate:
+1. Collect representative waste piles spanning different sizes, shapes, materials, camera distances, lighting, and occlusion.
+2. Measure reference volume using a documented, repeatable physical method.
+3. Split scenes into calibration/tuning and held-out evaluation sets; do not tune and report accuracy on the same samples.
+4. Record grid cell size, sparse-cell threshold, segmentation configuration, depth model/version, scale fit, and camera calibration for each run.
+5. Report MAE/RMSE and relative error where appropriate, alongside failures and excluded samples.
+6. Document limits and repeatability. A successful API job or accepted depth-scale fit is not a substitute for this evaluation.
