@@ -68,7 +68,7 @@ async def create_ground_reference(
         raise HTTPException(status_code=400, detail="Need at least 4 point correspondences")
     
     # Determine next version
-    from sqlalchemy import select, func
+    from sqlalchemy import func
     max_ver = await db.execute(
         select(func.max(GroundReference.version)).where(GroundReference.camera_id == camera_id)
     )
