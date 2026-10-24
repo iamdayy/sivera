@@ -71,11 +71,16 @@ class DepthMeasurement(BaseModel):
 
 
 class DepthScaleCreate(BaseModel):
-    """Fit an additional linear correction to model depth using camera-axis Z measurements."""
+    """Fit an additional linear correction to model depth using camera-axis Z measurements.
+    
+    Provide only `known_distances` (min 3 points on undistorted preview).
+    `test_image` defaults to first calibration image; `depth_model` defaults to DEFAULT_DEPTH_MODEL.
+    `clip_min_m`/`clip_max_m` default to 0.1m / 50m.
+    """
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     
-    test_image: str = Field(min_length=1, max_length=500, description="Relative storage key returned by POST .../depth-scales/test-images, or an image registered in this calibration's calib_images. /files is download-only; URLs and filesystem paths are not accepted.")
-    depth_model: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.pt$", max_length=200, description="Installed depth model filename under MODELS_DIR; no downloading or paths")
+    test_image: Optional[str] = Field(default=None, min_length=1, max_length=500, description="Relative storage key (defaults to first calibration image). /files is download-only; URLs and filesystem paths are not accepted.")
+    depth_model: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.pt$", max_length=200, description="Installed depth model filename under MODELS_DIR (defaults to DEFAULT_DEPTH_MODEL).")
     known_distances: List[DepthMeasurement] = Field(min_length=3, max_length=100, description="At least three distinct undistorted pixels with camera-axis Z measurements spanning different depths")
     clip_min_m: float = Field(0.1, ge=0.01, le=10.0)
     clip_max_m: float = Field(50.0, ge=5.0, le=200.0)

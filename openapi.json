@@ -2616,7 +2616,7 @@
           "depth-scales"
         ],
         "summary": "Create Depth Scale",
-        "description": "Synchronously fit and auto-activate a depth correction (201), not a queued prediction.\n\nRequires ground_ref:write and camera access. Points use the undistorted preview;\ndistance_m is camera-axis Z. Fit gates are heuristics, not metric certification.\nRejected computations leave the previous active scale unchanged.",
+        "description": "Synchronously fit and auto-activate a depth correction (201), not a queued prediction.\n\nRequires ground_ref:write and camera access. Points use the undistorted preview;\ndistance_m is camera-axis Z. Fit gates are heuristics, not metric certification.\nRejected computations leave the previous active scale unchanged.\n\nOnly `known_distances` (min 3 points) is required.\n`test_image` defaults to first calibration image.\n`depth_model` defaults to DEFAULT_DEPTH_MODEL.\n`clip_min_m`/`clip_max_m` default to 0.1m / 50m.",
         "operationId": "create_depth_scale_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_post",
         "parameters": [
           {
@@ -5128,18 +5128,32 @@
       "DepthScaleCreate": {
         "properties": {
           "test_image": {
-            "type": "string",
-            "maxLength": 500,
-            "minLength": 1,
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Test Image",
-            "description": "Relative storage key returned by POST .../depth-scales/test-images, or an image registered in this calibration's calib_images. /files is download-only; URLs and filesystem paths are not accepted."
+            "description": "Relative storage key (defaults to first calibration image). /files is download-only; URLs and filesystem paths are not accepted."
           },
           "depth_model": {
-            "type": "string",
-            "maxLength": 200,
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*\\.pt$",
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*\\.pt$"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Depth Model",
-            "description": "Installed depth model filename under MODELS_DIR; no downloading or paths"
+            "description": "Installed depth model filename under MODELS_DIR (defaults to DEFAULT_DEPTH_MODEL)."
           },
           "known_distances": {
             "items": {
@@ -5169,12 +5183,10 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "test_image",
-          "depth_model",
           "known_distances"
         ],
         "title": "DepthScaleCreate",
-        "description": "Fit an additional linear correction to model depth using camera-axis Z measurements."
+        "description": "Fit an additional linear correction to model depth using camera-axis Z measurements.\n\nProvide only `known_distances` (min 3 points on undistorted preview).\n`test_image` defaults to first calibration image; `depth_model` defaults to DEFAULT_DEPTH_MODEL.\n`clip_min_m`/`clip_max_m` default to 0.1m / 50m."
       },
       "DepthScaleImageResponse": {
         "properties": {

@@ -499,11 +499,24 @@ async def create_depth_scale(
     Requires ground_ref:write and camera access. Points use the undistorted preview;
     distance_m is camera-axis Z. Fit gates are heuristics, not metric certification.
     Rejected computations leave the previous active scale unchanged.
+    
+    Only `known_distances` (min 3 points) is required.
+    `test_image` defaults to first calibration image.
+    `depth_model` defaults to DEFAULT_DEPTH_MODEL.
+    `clip_min_m`/`clip_max_m` default to 0.1m / 50m.
     """
     camera, ground_model, calibration = await depth_context(db, camera_id, ground_model_id)
     await require_compatible_ground(db, camera_id, ground_model, calibration)
-    if body.test_image not in (calibration.calib_images or []) and not is_test_image_key(body.test_image, camera_id, ground_model_id):
+    
+    # Apply defaults
+    test_image_key = body.test_image or (calibration.calib_images[0] if calibration.calib_images else None)
+    if not test_image_key:
+        raise HTTPException(status_code=400, detail={"code": "depth_scale_no_test_image", "message": "No calibration images available; upload via /test-images or provide test_image"})
+    if test_image_key not in (calibration.calib_images or []) and not is_test_image_key(test_image_key, camera_id, ground_model_id):
         raise HTTPException(status_code=404, detail={"code": "depth_scale_image_not_registered"})
+    
+    depth_model = body.depth_model or settings.DEFAULT_DEPTH_MODEL
+    
     # Do not keep a database transaction open during bounded model execution.
     await db.commit()
     try:
@@ -512,8 +525,8 @@ async def create_depth_scale(
             camera=camera,
             calibration=calibration,
             ground_model=ground_model,
-            test_image_key=body.test_image,
-            depth_model=body.depth_model,
+            test_image_key=test_image_key,
+            depth_model=depth_model,
             known_distances=body.known_distances,
             clip_min_m=body.clip_min_m,
             clip_max_m=body.clip_max_m,
