@@ -22,12 +22,16 @@ boto3==1.35.40
 # Image processing
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
+scipy==1.14.1
 Pillow==10.4.0
 
 # ML
-ultralytics==8.3.0
-torch==2.5.0 --index-url https://download.pytorch.org/whl/cpu
-torchvision==0.20.0 --index-url https://download.pytorch.org/whl/cpu
+# Ultralytics requires opencv-python; keep it aligned with the headless wheel.
+opencv-python==4.10.0.84
+ultralytics==8.4.182
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.0+cpu
+torchvision==0.20.0+cpu
 
 # Utilities
 python-dotenv==1.0.1

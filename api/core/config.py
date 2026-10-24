@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     DEFAULT_BEV_MARGIN_M: float = 1.0
     DEFAULT_DEPTH_CLIP_MIN_M: float = 0.1
     DEFAULT_DEPTH_CLIP_MAX_M: float = 50.0
+    DEPTH_SCALE_TIMEOUT_SEC: int = Field(120, ge=10, le=600)
+    DEPTH_SCALE_MAX_MEAN_RESIDUAL_M: float = Field(0.25, gt=0, allow_inf_nan=False)
+    DEPTH_SCALE_MAX_RESIDUAL_M: float = Field(0.5, gt=0, allow_inf_nan=False)
+    DEPTH_SCALE_MAX_RELATIVE_RESIDUAL: float = Field(0.1, gt=0, le=1, allow_inf_nan=False)
     
     # Calibration defaults
     DEFAULT_CHESSBOARD_COLS: int = 9

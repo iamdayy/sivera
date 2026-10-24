@@ -56,7 +56,7 @@ def validate_rtsp_source(source: str, config: Settings = settings) -> None:
     ):
         raise MediaMTXError("invalid_rtsp_source", 422)
     allowed = {item.strip().lower() for item in config.MEDIAMTX_ALLOWED_RTSP_HOSTS.split(",") if item.strip()}
-    if allowed and host not in allowed:
+    if host not in allowed:
         raise MediaMTXError("rtsp_host_not_allowed", 422)
 
 

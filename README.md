@@ -76,7 +76,7 @@ Path fitur di atas berada di bawah `/api/v1`; ID kamera/job adalah UUID. Lihat `
 | Service | Deskripsi | Model/Algoritma |
 |---------|-----------|-----------------|
 | `segment_service` | Instance segmentation | YOLOv8/v11-seg |
-| `depth_service` | Monocular depth estimation | Depth Anything v2 |
+| `depth_service` | Monocular depth estimation | YOLO26 depth |
 | `calibration_service` | Kamera intrinsik calibration | OpenCV chessboard |
 | `ground_model_service` | IPM & ground plane | Homography + PnP |
 | `volume_service` | Volume estimation | Voxel grid + Convex hull |
@@ -357,9 +357,11 @@ Download gambar/output memerlukan `X-API-Key`: frontend harus mengambil blob mel
 
 ### Batas readiness dan keamanan
 
-Tidak ada API publik untuk membuat atau memeriksa depth scale. Operator harus menyediakan scale terverifikasi untuk ground model yang kompatibel; setup kamera/kalibrasi/referensi tanah belum menjamin prediksi dapat berjalan. `estimated_duration_sec=30` hanya angka advisory tetap, bukan progress atau SLA.
+API depth-scale tersedia di `/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales`. Unggah gambar melalui `POST /test-images` (multipart `file`, 201), tampilkan PNG undistorted dari `image_url` menggunakan fetch berheader `X-API-Key`, lalu kirim JSON creation memakai `test_image` dari respons upload. `/files` hanya untuk download. Panduan kontrak dan payload: [pesan perubahan dashboard](docs/depth-scale-dashboard-handoff.md).
 
-Gap legacy belum diperbaiki: handler ground-reference/model belum membatasi key terikat kamera, autentikasi key database belum memeriksa `expires_at`, dan cabang fallback `/files` belum menerapkan semua scope/registrasi artifact. Jangan mengklaim isolasi tenant penuh atau enforcement expiry; perbaikan terfokus dan regresinya diperlukan sebelum deployment multi-tenant.
+Creation memerlukan 3..100 titik pixel integer yang berbeda dan `distance_m` berupa **Z pada sumbu kamera dalam meter**, bukan jarak Euclidean dari rangefinder. Backend memakai adapter YOLO depth yang sama dengan prediction, menolak input/fit yang tidak layak, lalu auto-activate hasil yang lolos (201). Inferensi sinkron dibatasi timeout 120 detik secara default; busy/timeout mendapat 503. Residual fit bukan bukti akurasi fisik. Setup kamera/kalibrasi/referensi tanah tanpa scale yang cocok belum menjamin prediksi dapat berjalan. `estimated_duration_sec=30` hanya angka advisory tetap untuk prediction, bukan progress atau SLA.
+
+Router ground-reference/model/depth-scale kini membatasi key terikat kamera. Gap legacy tersisa: autentikasi key database belum memeriksa `expires_at`, dan cabang fallback `/files` belum menerapkan semua scope/registrasi artifact. Jangan mengklaim isolasi tenant penuh atau enforcement expiry; perbaikan terfokus dan regresinya diperlukan sebelum deployment multi-tenant.
 
 ### Contoh Penggunaan
 

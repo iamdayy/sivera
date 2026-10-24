@@ -45,6 +45,12 @@ def test_source_allowlist(source, config):
     validate_rtsp_source(source, config)
 
 
+def test_empty_allowlist_denies_all_sources(config):
+    config.MEDIAMTX_ALLOWED_RTSP_HOSTS = " , "
+    with pytest.raises(MediaMTXError, match="^rtsp_host_not_allowed$"):
+        validate_rtsp_source("rtsp://192.0.2.1/live", config)
+
+
 @pytest.mark.anyio
 async def test_idempotent_path_creation_and_patch(config):
     calls = []

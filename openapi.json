@@ -2384,10 +2384,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Path to test image (optional)",
+              "description": "Relative camera-owned source storage key; defaults to a registered calibration image. Input follows prediction's raw/legacy image contract.",
               "title": "Test Image Path"
             },
-            "description": "Path to test image (optional)"
+            "description": "Relative camera-owned source storage key; defaults to a registered calibration image. Input follows prediction's raw/legacy image contract."
           },
           {
             "name": "mask_path",
@@ -2402,10 +2402,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Path to mask image (optional)",
+              "description": "Relative camera-owned undistorted mask storage key with matching dimensions and its domain read scope",
               "title": "Mask Path"
             },
-            "description": "Path to mask image (optional)"
+            "description": "Relative camera-owned undistorted mask storage key with matching dimensions and its domain read scope"
           }
         ],
         "responses": {
@@ -2443,13 +2443,180 @@
         ]
       }
     },
+    "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales/test-images": {
+      "post": {
+        "tags": [
+          "depth-scales"
+        ],
+        "summary": "Upload Depth Scale Image",
+        "operationId": "upload_depth_scale_image_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_test_images_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_depth_scale_image_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_test_images_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepthScaleImageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/oversized image or mismatched calibration dimensions"
+          },
+          "404": {
+            "description": "Camera, ground model, or calibration missing"
+          },
+          "409": {
+            "description": "Ground model is not compatible with active calibration/reference"
+          },
+          "503": {
+            "description": "Image storage unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales/test-images/{image_id}/image": {
+      "get": {
+        "tags": [
+          "depth-scales"
+        ],
+        "summary": "Download Depth Scale Image",
+        "operationId": "download_depth_scale_image_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_test_images__image_id__image_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          },
+          {
+            "name": "image_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Image Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Image or parent ground model missing"
+          },
+          "503": {
+            "description": "Image storage unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales": {
       "post": {
         "tags": [
           "depth-scales"
         ],
         "summary": "Create Depth Scale",
-        "description": "Create depth scale from test image with known distance measurements.\n\nComputes scale and offset by comparing YOLO depth output with known distances.\nDeactivates existing depth scales for this ground_model.",
+        "description": "Synchronously fit and auto-activate a depth correction (201), not a queued prediction.\n\nRequires ground_ref:write and camera access. Points use the undistorted preview;\ndistance_m is camera-axis Z. Fit gates are heuristics, not metric certification.\nRejected computations leave the previous active scale unchanged.",
         "operationId": "create_depth_scale_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_post",
         "parameters": [
           {
@@ -2493,6 +2660,18 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid image, measurement, depth output, or rejected fit"
+          },
+          "404": {
+            "description": "Parent resource or test image missing"
+          },
+          "409": {
+            "description": "Active calibration/reference/ground model changed"
+          },
+          "503": {
+            "description": "Model, storage, or inference unavailable/busy/timed out"
           },
           "422": {
             "description": "Validation Error",
@@ -2771,6 +2950,15 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "Depth scale or parent resource missing"
+          },
+          "409": {
+            "description": "Incompatible ground model or invalid saved fit; create a new scale"
+          },
+          "503": {
+            "description": "Model or persistence unavailable"
           },
           "422": {
             "description": "Validation Error",
@@ -3595,6 +3783,21 @@
           "source_type"
         ],
         "title": "Body_submit_prediction_api_v1_cameras__camera_id__predict_post"
+      },
+      "Body_upload_depth_scale_image_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_test_images_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "Raw JPEG/PNG/BMP at calibration dimensions; legacy calibration requires an already-undistorted image"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_depth_scale_image_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_test_images_post"
       },
       "CalibrationActivateResponse": {
         "properties": {
@@ -4892,26 +5095,61 @@
         ],
         "title": "CaptureResponse"
       },
+      "DepthMeasurement": {
+        "properties": {
+          "x": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "X",
+            "description": "Integer column in the undistorted preview, not CSS pixels"
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Y",
+            "description": "Integer row in the undistorted preview, not CSS pixels"
+          },
+          "distance_m": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Distance M",
+            "description": "Camera-axis Z in meters, NOT Euclidean rangefinder distance"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "x",
+          "y",
+          "distance_m"
+        ],
+        "title": "DepthMeasurement"
+      },
       "DepthScaleCreate": {
         "properties": {
           "test_image": {
             "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
             "title": "Test Image",
-            "description": "Storage key of test image (uploaded via /files or calibration capture)"
+            "description": "Relative storage key returned by POST .../depth-scales/test-images, or an image registered in this calibration's calib_images. /files is download-only; URLs and filesystem paths are not accepted."
           },
           "depth_model": {
             "type": "string",
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*\\.pt$",
             "title": "Depth Model",
-            "description": "Depth model name used (e.g., 'yolo26n-depth.pt')"
+            "description": "Installed depth model filename under MODELS_DIR; no downloading or paths"
           },
           "known_distances": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/DepthMeasurement"
             },
             "type": "array",
+            "maxItems": 100,
+            "minItems": 3,
             "title": "Known Distances",
-            "description": "List of {x, y, distance_m} for known distance points in image coordinates (undistorted)"
+            "description": "At least three distinct undistorted pixels with camera-axis Z measurements spanning different depths"
           },
           "clip_min_m": {
             "type": "number",
@@ -4936,7 +5174,55 @@
           "known_distances"
         ],
         "title": "DepthScaleCreate",
-        "description": "Create depth scale from a test image with known distance measurements."
+        "description": "Fit an additional linear correction to model depth using camera-axis Z measurements."
+      },
+      "DepthScaleImageResponse": {
+        "properties": {
+          "image_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Image Id"
+          },
+          "test_image": {
+            "type": "string",
+            "title": "Test Image",
+            "description": "Source storage key to pass unchanged to depth-scale creation"
+          },
+          "image_url": {
+            "type": "string",
+            "title": "Image Url",
+            "description": "Authenticated undistorted PNG preview; fetch with X-API-Key"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height"
+          },
+          "coordinate_system": {
+            "type": "string",
+            "const": "undistorted_pixels",
+            "title": "Coordinate System",
+            "default": "undistorted_pixels"
+          },
+          "distance_type": {
+            "type": "string",
+            "const": "camera_axis_z_m",
+            "title": "Distance Type",
+            "default": "camera_axis_z_m"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_id",
+          "test_image",
+          "image_url",
+          "width",
+          "height"
+        ],
+        "title": "DepthScaleImageResponse"
       },
       "DepthScaleListResponse": {
         "properties": {

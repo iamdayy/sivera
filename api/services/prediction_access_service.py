@@ -5,7 +5,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.security import check_camera_access
-from api.models.orm import ApiKey, CameraSnapshot, PredictionJob, PredictionOutput
+from api.models.orm import ApiKey, CameraSnapshot, PredictionJob, PredictionOutput, GroundModel
 
 
 async def require_job(db: AsyncSession, camera_id: UUID, job_id: UUID, api_key: ApiKey) -> None:
@@ -28,7 +28,20 @@ async def authorize_artifact(db: AsyncSession, key: str, api_key: ApiKey) -> Non
     except ValueError:
         raise HTTPException(status_code=404, detail="Artifact not found") from None
     check_camera_access(api_key, camera_id)
-    if "snapshots" in parts:
+    if parts[2] == "depth-scale-images":
+        from api.services.depth_scale_service import is_test_image_key
+        try:
+            ground_model_id = UUID(parts[3])
+        except (ValueError, IndexError):
+            raise HTTPException(status_code=404, detail="Artifact not found") from None
+        source_key = key.removesuffix("undistorted.png") + "source.image" if key.endswith("/undistorted.png") else key
+        if not is_test_image_key(source_key, camera_id, ground_model_id):
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        found = await db.scalar(select(GroundModel.id).where(GroundModel.id == ground_model_id, GroundModel.camera_id == camera_id))
+        scopes = ("ground_ref:read",)
+        if found is None:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+    elif "snapshots" in parts:
         found = await db.scalar(select(CameraSnapshot.id).where(CameraSnapshot.storage_key == key, CameraSnapshot.camera_id == camera_id))
         scopes = ("camera:read",)
         if found is None:

@@ -111,8 +111,8 @@ class TestComputeBEV:
 def test_bev_preview_encodes_images_with_persisted_matrices(monkeypatch, tmp_path):
     storage = LocalStorage(tmp_path / "artifacts")
     monkeypatch.setattr(service, "get_storage", lambda: storage)
-    camera = Camera(id=uuid4())
-    calibration = Calibration(k_matrix=np.eye(3).tolist())
+    camera = Camera(id=uuid4(), resolution_w=100, resolution_h=100)
+    calibration = Calibration(k_matrix=np.eye(3).tolist(), k_original=None, resolution_w=None, resolution_h=None)
     ground = GroundModel(H_i2w=[[.01, 0, 0], [0, .01, 0], [0, 0, 1]],
                          H_w2i=[[100, 0, 0], [0, 100, 0], [0, 0, 1]],
                          R_matrix=np.eye(3).tolist(), t_vector=[0, 0, 0],

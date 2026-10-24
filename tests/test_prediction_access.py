@@ -51,3 +51,21 @@ def test_snapshot_files_need_camera_read_and_matching_camera():
     with pytest.raises(HTTPException) as exc:
         asyncio.run(authorize_artifact(db, path, key))
     assert exc.value.status_code == 403
+
+
+def test_depth_scale_images_require_ground_scope_parent_and_camera():
+    from api.services.depth_scale_service import test_image_key
+    camera, ground, image = uuid4(), uuid4(), uuid4()
+    db = SimpleNamespace(scalar=AsyncMock(return_value=ground))
+    key = SimpleNamespace(camera_id=camera, scopes=["ground_ref:read"])
+    for preview in (False, True):
+        asyncio.run(authorize_artifact(db, test_image_key(camera, ground, image, preview), key))
+    key.scopes = ["predict:read"]
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(authorize_artifact(db, test_image_key(camera, ground, image), key))
+    assert exc.value.status_code == 403
+    key.scopes = ["ground_ref:read"]
+    db.scalar.return_value = None
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(authorize_artifact(db, test_image_key(camera, ground, image), key))
+    assert exc.value.status_code == 404

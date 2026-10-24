@@ -174,12 +174,19 @@ def prepare_prediction_image(image: np.ndarray, calibration: Calibration, camera
     if image is None:
         raise ValueError("prediction_invalid_image")
     size = (calibration.resolution_w, calibration.resolution_h)
+    if calibration.k_original is not None and not all(size):
+        raise ValueError("calibration_invalid_intrinsics")
     explicit = calibration.k_original is not None and all(size)
     if source_type != "upload" and not explicit:
         raise ValueError("calibration_intrinsics_missing")
     expected = size if explicit else (camera.resolution_w, camera.resolution_h)
     if image.shape[1::-1] != expected:
         raise ValueError("prediction_resolution_mismatch")
+    registered = np.array(calibration.k_matrix, np.float64)
+    if (registered.shape != (3, 3) or not np.isfinite(registered).all()
+            or min(registered[0, 0], registered[1, 1]) <= 0
+            or not np.allclose(registered[2], [0, 0, 1])):
+        raise ValueError("calibration_invalid_intrinsics")
     if not explicit:
         # Legacy uploads retain the historical already-undistorted input contract.
         return image
@@ -188,7 +195,8 @@ def prepare_prediction_image(image: np.ndarray, calibration: Calibration, camera
     distortion = np.array(calibration.dist_coeffs, np.float64).ravel()
     if (original.shape != (3, 3) or target.shape != (3, 3) or len(distortion) not in {4, 5, 8, 12, 14}
             or not np.isfinite(original).all() or not np.isfinite(target).all() or not np.isfinite(distortion).all()
-            or min(original[0, 0], original[1, 1], target[0, 0], target[1, 1]) <= 0):
+            or min(original[0, 0], original[1, 1], target[0, 0], target[1, 1]) <= 0
+            or not np.allclose(original[2], [0, 0, 1]) or not np.allclose(target, registered)):
         raise ValueError("calibration_invalid_intrinsics")
     return cv2.undistort(image, original, distortion, None, target)
 

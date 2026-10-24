@@ -14,6 +14,7 @@ from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import Camera, Calibration, GroundReference, GroundModel
 from api.services.image_service import encode_image
+from api.services.depth_scale_service import compute_depth_scale, read_image, prepare_image
 
 
 def compute_ground_model(
@@ -289,31 +290,13 @@ async def generate_bev_preview(
     """Generate BEV preview images and save to storage."""
     storage = get_storage()
     
-    # Load image from storage (test_image_path is a storage key)
-    img_data = storage.get(test_image_path)
-    if img_data is None:
-        raise ValueError(f"Test image not found in storage: {test_image_path}")
-    try:
-        img_array = np.frombuffer(img_data.read(settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1), np.uint8)
-    finally:
-        img_data.close()
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError(f"Cannot decode test image: {test_image_path}")
+    img = prepare_image(read_image(test_image_path, storage), calibration, camera)
     
     # Load or create mask
     if mask_path:
-        mask_data = storage.get(mask_path)
-        if mask_data is None:
-            raise ValueError(f"Mask image not found in storage: {mask_path}")
-        try:
-            mask_array = np.frombuffer(mask_data.read(settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1), np.uint8)
-        finally:
-            mask_data.close()
-        mask = cv2.imdecode(mask_array, cv2.IMREAD_GRAYSCALE)
-        if mask is None:
-            raise ValueError(f"Cannot decode mask image: {mask_path}")
-        mask = mask > 127
+        mask = cv2.cvtColor(read_image(mask_path, storage), cv2.COLOR_BGR2GRAY) > 127
+        if mask.shape != img.shape[:2]:
+            raise ValueError("bev_mask_resolution_mismatch")
     else:
         # Create dummy mask for preview
         mask = np.zeros(img.shape[:2], bool)
@@ -346,7 +329,7 @@ async def generate_bev_preview(
             extension="jpg"
         )
         storage.save(key, buf, "image/jpeg")
-        return storage.get_url(key)
+        return f"/files/{key}"
     
     return {
         "bev_image_url": save_img(bev_img, "image"),
@@ -355,98 +338,3 @@ async def generate_bev_preview(
         "bev_info": bev_info,
     }
 
-
-async def compute_depth_scale(
-    db: AsyncSession,
-    camera: Camera,
-    calibration: Calibration,
-    ground_model: GroundModel,
-    test_image_key: str,
-    depth_model: str,
-    known_distances: List[dict],
-    clip_min_m: float = 0.1,
-    clip_max_m: float = 50.0,
-) -> dict:
-    """
-    Compute depth scale from a test image with known distance measurements.
-    
-    Args:
-        db: Database session
-        camera: Camera object
-        calibration: Active calibration
-        ground_model: Active ground model
-        test_image_key: Storage key of test image
-        depth_model: Depth model name (e.g., 'yolo26n-depth.pt')
-        known_distances: List of {x, y, distance_m} in undistorted image coordinates
-        clip_min_m: Minimum depth clip
-        clip_max_m: Maximum depth clip
-    
-    Returns:
-        dict with scale_s, offset_b, residuals, mean_residual_m, max_residual_m
-    """
-    storage = get_storage()
-    
-    # Load test image from storage
-    img_data = storage.get(test_image_key)
-    if img_data is None:
-        raise ValueError(f"Test image not found in storage: {test_image_key}")
-    try:
-        img_array = np.frombuffer(img_data.read(settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024 + 1), np.uint8)
-    finally:
-        img_data.close()
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError(f"Cannot decode test image: {test_image_key}")
-    
-    # Run depth estimation on test image
-    from api.services.depth_service import run_depth
-    depth_raw = await run_depth(img, depth_model)
-    if depth_raw is None:
-        raise ValueError("Depth estimation failed")
-    
-    # Undistort depth if calibration has original intrinsics
-    if calibration.k_original is not None and calibration.resolution_w and calibration.resolution_h:
-        K_orig = np.array(calibration.k_original, np.float64)
-        dist = np.array(calibration.dist_coeffs, np.float64)
-        K_target = np.array(calibration.k_undist or calibration.k_matrix, np.float64)
-        # Undistort depth map
-        depth_raw = cv2.undistort(depth_raw, K_orig, dist, None, K_target)
-    
-    # Extract depth values at known distance points
-    raw_depths = []
-    true_depths = []
-    for pt in known_distances:
-        x, y = int(pt["x"]), int(pt["y"])
-        true_d = float(pt["distance_m"])
-        if 0 <= y < depth_raw.shape[0] and 0 <= x < depth_raw.shape[1]:
-            raw_d = float(depth_raw[y, x])
-            if clip_min_m <= true_d <= clip_max_m and raw_d > 0:
-                raw_depths.append(raw_d)
-                true_depths.append(true_d)
-    
-    if len(raw_depths) < 2:
-        raise ValueError(f"Need at least 2 valid known distance points within clip range, got {len(raw_depths)}")
-    
-    # Linear regression: true_depth = scale * raw_depth + offset
-    raw_depths = np.array(raw_depths, np.float64)
-    true_depths = np.array(true_depths, np.float64)
-    
-    A = np.vstack([raw_depths, np.ones_like(raw_depths)]).T
-    scale_s, offset_b = np.linalg.lstsq(A, true_depths, rcond=None)[0]
-    
-    # Compute residuals
-    pred_depths = scale_s * raw_depths + offset_b
-    residuals = pred_depths - true_depths
-    mean_residual = float(np.mean(np.abs(residuals)))
-    max_residual = float(np.max(np.abs(residuals)))
-    
-    return {
-        "scale_s": float(scale_s),
-        "offset_b": float(offset_b),
-        "residuals": residuals.tolist(),
-        "mean_residual_m": mean_residual,
-        "max_residual_m": max_residual,
-        "clip_min_m": clip_min_m,
-        "clip_max_m": clip_max_m,
-        "depth_model": depth_model,
-    }

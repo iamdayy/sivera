@@ -1,5 +1,6 @@
 """Depth estimation service: wraps depth.py logic."""
 import tempfile
+import re
 from pathlib import Path
 from typing import List, Optional, Tuple
 from uuid import uuid4
@@ -16,6 +17,18 @@ from api.services.image_service import encode_image
 
 # Lazy model cache: loads each YOLO depth model once per process
 _depth_model_cache: dict = {}
+
+
+def resolve_depth_model(name: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.pt", name):
+        raise ValueError("depth_model_invalid_name")
+    root = Path(settings.MODELS_DIR).resolve()
+    candidate = (root / name).resolve()
+    if not candidate.is_relative_to(root):
+        raise ValueError("depth_model_invalid_name")
+    if not candidate.is_file():
+        raise ValueError("depth_model_unavailable")
+    return candidate
 
 
 def predict_depth(
@@ -238,9 +251,7 @@ async def run_depth_pipeline(
     storage = get_storage()
     
     # 1. Predict depth
-    depth_model_path = Path(settings.MODELS_DIR) / depth_scale.depth_model
-    if not depth_model_path.exists():
-        raise FileNotFoundError(f"Depth model not found: {depth_scale.depth_model} (looked in {settings.MODELS_DIR})")
+    depth_model_path = resolve_depth_model(depth_scale.depth_model)
     
     depth_raw = predict_depth(
         image, str(depth_model_path),
