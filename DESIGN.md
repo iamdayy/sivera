@@ -269,3 +269,22 @@ Before claiming that volume estimation is accurate:
 4. Record grid cell size, sparse-cell threshold, segmentation configuration, depth model/version, scale fit, and camera calibration for each run.
 5. Report MAE/RMSE and relative error where appropriate, alongside failures and excluded samples.
 6. Document limits and repeatability. A successful API job or accepted depth-scale fit is not a substitute for this evaluation.
+
+
+## User management and organization scope
+
+### Current release: one organization
+
+The current scope is a single organization. Keep the model and API simple; do not add speculative organization tables, tenant IDs, organization-switching UI, or claim tenant isolation before multi-organization support is explicitly planned.
+
+### Authentication and roles
+
+The backend's X-API-Key is API/service authentication and must not be mistaken for end-user login, sessions, or role-based access. Any account-management feature must begin by verifying the real authentication provider, principal model, session lifecycle, and API permission contract. Do not invent user CRUD or invitation endpoints.
+
+Suggested product roles, pending implementation: administrator (user/access management and permitted configuration), operator (create measurements and review permitted results), viewer (read-only results/history). Enforce every permission on the backend; frontend route guards and hidden buttons are only usability measures. Distinguish unauthenticated (401), unauthorized (403), expired session, validation errors, and service failures.
+
+Where supported, user administration should provide user search/list, role and active status, a real creation/invitation flow, confirmed role changes and deactivation, and a safeguard against removing the last administrator. Add tests for allowed and denied actions.
+
+### Future multi-organization extension
+
+Centralize authorization and resource-access decisions so organization scoping can be added without duplicating checks across routes. Before multi-organization launch, define ownership for users, cameras, calibration versions, ground models, depth scales, prediction jobs, and output artifacts; introduce schema/API scope with a documented backfill; and test that one organization cannot read, mutate, or download another organization's resources. This is a future migration, not a requirement to add tenant fields now.
