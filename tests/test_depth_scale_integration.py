@@ -46,6 +46,8 @@ def test_real_cpu_depth_adapter_and_bounded_calibration(monkeypatch, tmp_path):
     ordered = np.argsort(depth.ravel())
     positions = ordered[[len(ordered)//10, len(ordered)//2, len(ordered)*9//10]]
     measurements = [{"x": int(index % 320), "y": int(index // 320), "distance_m": float(depth.ravel()[index] * .5 + .2)} for index in positions]
+    from api.schemas.ground_ref import DepthMeasurement
+    measurements = [DepthMeasurement(**m) for m in measurements]
     result = asyncio.run(depth_scale_service.compute_depth_scale(None, camera, calibration, None,
         "synthetic.png", model.name, measurements))
     assert result["scale_s"] == pytest.approx(.5, abs=1e-4)
@@ -95,8 +97,11 @@ def test_postgres_create_activate_concurrency_and_prediction_pins(monkeypatch, t
             async with context() as db:
                 db.add(Camera(id=camera_id, name="depth-disposable", resolution_w=64, resolution_h=48))
                 await db.flush()
+                image_key = f"cameras/{camera_id}/calib_images/scene.png"
+                # Save dummy image for calibration image
+                storage.save(image_key, io.BytesIO(encode_image(np.zeros((48, 64, 3), np.uint8), ".png")), "image/png")
                 db.add(Calibration(id=calibration_id, camera_id=camera_id, version=1, k_original=K, k_undist=K,
-                    k_matrix=K, dist_coeffs=[0]*5, resolution_w=64, resolution_h=48, is_active=True))
+                    k_matrix=K, dist_coeffs=[0]*5, resolution_w=64, resolution_h=48, is_active=True, calib_images=[image_key]))
                 await db.flush()
                 db.add(GroundReference(id=reference_id, camera_id=camera_id, calibration_id=calibration_id,
                     version=1, image_points=[[0, 0], [63, 0], [63, 47], [0, 47]],
@@ -112,7 +117,7 @@ def test_postgres_create_activate_concurrency_and_prediction_pins(monkeypatch, t
                         await submit_prediction_job(db, camera_id, "upload")
                 uploaded = await client.post(prefix + "/test-images", files={"file": ("image.png", encode_image(np.zeros((48, 64, 3), np.uint8), ".png"))})
                 assert uploaded.status_code == 201, uploaded.text
-                request = body(test_image=uploaded.json()["test_image"]).model_dump()
+                request = body().model_dump()
                 created = []
                 for _ in range(2):
                     response = await client.post(prefix, json=request)

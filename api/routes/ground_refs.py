@@ -393,10 +393,9 @@ async def require_compatible_ground(db: AsyncSession, camera_id: UUID, ground: G
 
 async def authorize_ground_image(db: AsyncSession, key: str, camera_id: UUID, ground: GroundModel,
                                  calibration: Calibration, api_key: ApiKey, source: bool = True) -> None:
-    try:
-        DepthScaleCreate.storage_key(key)
-    except ValueError:
-        raise HTTPException(status_code=400, detail={"code": "depth_scale_invalid_image_key"}) from None
+    # Validate storage key format (same logic as removed DepthScaleCreate.storage_key validator)
+    if "\\" in key or ":" in key or any(part in {"", ".", ".."} for part in key.split("/")):
+        raise HTTPException(status_code=400, detail={"code": "depth_scale_invalid_image_key"})
     if source and (key in (calibration.calib_images or []) or is_test_image_key(key, camera_id, ground.id)):
         return
     parts = key.split("/")
@@ -509,13 +508,13 @@ async def create_depth_scale(
     await require_compatible_ground(db, camera_id, ground_model, calibration)
     
     # Apply defaults
-    test_image_key = body.test_image or (calibration.calib_images[0] if calibration.calib_images else None)
+    test_image_key = calibration.calib_images[0] if calibration.calib_images else None
     if not test_image_key:
-        raise HTTPException(status_code=400, detail={"code": "depth_scale_no_test_image", "message": "No calibration images available; upload via /test-images or provide test_image"})
+        raise HTTPException(status_code=400, detail={"code": "depth_scale_no_test_image", "message": "No calibration images available; upload via /test-images"})
     if test_image_key not in (calibration.calib_images or []) and not is_test_image_key(test_image_key, camera_id, ground_model_id):
         raise HTTPException(status_code=404, detail={"code": "depth_scale_image_not_registered"})
     
-    depth_model = body.depth_model or settings.DEFAULT_DEPTH_MODEL
+    depth_model = settings.DEFAULT_DEPTH_MODEL
     
     # Do not keep a database transaction open during bounded model execution.
     await db.commit()
@@ -528,8 +527,8 @@ async def create_depth_scale(
             test_image_key=test_image_key,
             depth_model=depth_model,
             known_distances=body.known_distances,
-            clip_min_m=body.clip_min_m,
-            clip_max_m=body.clip_max_m,
+            clip_min_m=0.1,
+            clip_max_m=50.0,
         )
     except ValueError as exc:
         raise image_error(exc) from None

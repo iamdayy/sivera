@@ -71,9 +71,9 @@ def fit_depth_scale(depth: np.ndarray, body: DepthScaleCreate, config: Settings 
     absolute = np.abs(residuals)
     if (fitted <= 0).any() or absolute.mean() > config.DEPTH_SCALE_MAX_MEAN_RESIDUAL_M or absolute.max() > config.DEPTH_SCALE_MAX_RESIDUAL_M or (absolute / truth).max() > config.DEPTH_SCALE_MAX_RELATIVE_RESIDUAL:
         raise ValueError("depth_scale_poor_fit")
-    return {"depth_model": body.depth_model, "scale_s": scale, "offset_b": offset,
+    return {"depth_model": settings.DEFAULT_DEPTH_MODEL, "scale_s": scale, "offset_b": offset,
             "residuals": residuals.tolist(), "mean_residual_m": float(absolute.mean()),
-            "max_residual_m": float(absolute.max()), "clip_min_m": body.clip_min_m, "clip_max_m": body.clip_max_m}
+            "max_residual_m": float(absolute.max()), "clip_min_m": 0.1, "clip_max_m": 50.0}
 
 
 def validate_saved_scale(scale: DepthScale, config: Settings = settings) -> None:
@@ -96,11 +96,10 @@ async def compute_depth_scale(
     clip_min_m: float = 0.1, clip_max_m: float = 50.0,
 ) -> dict:
     from api.services.depth_service import resolve_depth_model
-    body = DepthScaleCreate(test_image=test_image_key, depth_model=depth_model,
-                            known_distances=known_distances, clip_min_m=clip_min_m, clip_max_m=clip_max_m)
-    model = resolve_depth_model(body.depth_model)
-    image = prepare_image(read_image(body.test_image, get_storage()), calibration, camera)
-    if any(point.x >= image.shape[1] or point.y >= image.shape[0] for point in body.known_distances):
+    body = DepthScaleCreate(known_distances=known_distances)
+    model = resolve_depth_model(depth_model)
+    image = prepare_image(read_image(test_image_key, get_storage()), calibration, camera)
+    if any(point.x >= image.shape[1] or point.y >= image.shape[0] for point in known_distances):
         raise ValueError("depth_scale_pixel_out_of_bounds")
     if _inference_lock.locked():
         raise VisionError("depth_scale_busy")

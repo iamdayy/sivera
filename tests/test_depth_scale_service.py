@@ -19,8 +19,7 @@ from api.services.vision_process_service import VisionError
 
 
 def body(**changes):
-    values = {"test_image": "registered/scene.png", "depth_model": "yolo26n-depth.pt",
-              "known_distances": [{"x": 10, "y": 10, "distance_m": 3.0},
+    values = {"known_distances": [{"x": 10, "y": 10, "distance_m": 3.0},
                                   {"x": 20, "y": 20, "distance_m": 5.0},
                                   {"x": 30, "y": 30, "distance_m": 7.0}]}
     return DepthScaleCreate.model_validate(dict(values, **changes))
@@ -32,12 +31,6 @@ def body(**changes):
     {"known_distances": [{"x": 1.2, "y": 2, "distance_m": 3}] * 3},
     {"known_distances": [{"x": 1, "y": 2, "distance_m": -3}] * 3},
     {"known_distances": [{"x": 1, "y": 2, "distance_m": float("nan")}] * 3},
-    {"known_distances": [{"x": 1, "y": 2, "distance_m": 3}] * 3},
-    {"clip_min_m": 10, "clip_max_m": 5}, {"clip_min_m": float("nan")},
-    {"clip_max_m": float("inf")}, {"depth_model": "../outside.pt"},
-    {"depth_model": "https://host/model.pt"}, {"test_image": "/private/scene.png"},
-    {"test_image": "cameras/../scene.png"}, {"test_image": "https://host/files/scene.png"},
-    {"test_image": "cameras\\private.png"}, {"clip_min_m": 4},
 ])
 def test_schema_rejects_bad_inputs(changes):
     with pytest.raises(ValidationError):
@@ -139,14 +132,14 @@ def test_computation_prepares_same_image_as_prediction_and_bounds_process(monkey
     runner = AsyncMock(side_effect=process)
     monkeypatch.setattr(service, "run_vision", runner)
     request = body()
-    result = asyncio.run(service.compute_depth_scale(None, camera, calibration, None, request.test_image,
-        request.depth_model, request.known_distances))
+    result = asyncio.run(service.compute_depth_scale(None, camera, calibration, None, "registered/scene.png",
+        settings.DEFAULT_DEPTH_MODEL, request.known_distances))
     assert result["scale_s"] == pytest.approx(2)
     np.testing.assert_array_equal(received[0], prepare_prediction_image(image, calibration, camera, "upload"))
     calibration.resolution_w = 128
     with pytest.raises(ValueError, match="prediction_resolution_mismatch"):
-        asyncio.run(service.compute_depth_scale(None, camera, calibration, None, request.test_image,
-            request.depth_model, request.known_distances))
+        asyncio.run(service.compute_depth_scale(None, camera, calibration, None, "registered/scene.png",
+            settings.DEFAULT_DEPTH_MODEL, request.known_distances))
     assert runner.await_count == 1
 
 

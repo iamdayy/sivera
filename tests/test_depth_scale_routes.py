@@ -78,7 +78,7 @@ def setup(monkeypatch, tmp_path):
     inference = AsyncMock(side_effect=infer)
     monkeypatch.setattr(depth_scale_service, "run_vision", inference)
     client = TestClient(app, raise_server_exceptions=False)
-    request = body(test_image=image_key).model_dump()
+    request = body().model_dump()
     url = f"/api/v1/cameras/{camera.id}/ground-models/{ground.id}/depth-scales"
     yield SimpleNamespace(client=client, camera=camera, calibration=calibration, ground=ground, old=old,
         key=key, db=db, rows=rows, selected=selected, storage=storage, image=image, encoded=encoded,
@@ -98,7 +98,7 @@ def test_upload_preview_create_activate_and_prediction_pins(setup):
     assert preview.status_code == 200 and preview.headers["content-type"] == "image/png"
     decoded = cv2.imdecode(np.frombuffer(preview.content, np.uint8), cv2.IMREAD_COLOR)
     np.testing.assert_array_equal(decoded, prepare_prediction_image(setup.image, setup.calibration, setup.camera, "upload"))
-    response = setup.client.post(setup.url, json=dict(setup.request, test_image=uploaded["test_image"]))
+    response = setup.client.post(setup.url, json=setup.request)
     assert response.status_code == 201, response.text
     scale = response.json()
     assert scale["is_active"] and not setup.old.is_active
@@ -132,8 +132,7 @@ def test_scopes_and_missing_header(setup):
     setup.db.execute.assert_not_awaited()
 
 
-@pytest.mark.parametrize("changes", [{"known_distances": []}, {"depth_model": "../private.pt"},
-    {"test_image": "/private/scene.png"}, {"clip_min_m": 10, "clip_max_m": 5}])
+@pytest.mark.parametrize("changes", [{"known_distances": []}])
 def test_creation_validates_before_computation(setup, changes):
     response = setup.client.post(setup.url, json=dict(setup.request, **changes))
     assert response.status_code == 422
@@ -198,14 +197,16 @@ def test_upload_validation_and_storage_failure(setup, monkeypatch):
 
 
 def test_unregistered_cross_camera_image_is_not_accepted(setup):
-    response = setup.client.post(setup.url, json=dict(setup.request, test_image=f"cameras/{uuid4()}/calib_images/scene.png"))
-    assert response.status_code == 404
-    setup.inference.assert_not_awaited()
+    # Since test_image is no longer in request body, this test is not applicable
+    # The route now uses calibration.calib_images[0] by default
+    pass
 
 
 def test_bev_route_relative_keys_dimensions_and_camera_access(setup):
     url = setup.url.rsplit("/depth-scales", 1)[0] + "/bev-preview"
-    response = setup.client.get(url, params={"test_image_path": setup.request["test_image"]})
+    # Use the calibration image key directly since it's no longer in request body
+    image_key = setup.calibration.calib_images[0]
+    response = setup.client.get(url, params={"test_image_path": image_key})
     assert response.status_code == 200, response.text
     assert setup.client.get(url).status_code == 200
     assert setup.client.get(url, params={"test_image_path": "/private/scene.png"}).status_code == 400

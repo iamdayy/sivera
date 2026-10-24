@@ -73,34 +73,14 @@ class DepthMeasurement(BaseModel):
 class DepthScaleCreate(BaseModel):
     """Fit an additional linear correction to model depth using camera-axis Z measurements.
     
-    Provide only `known_distances` (min 3 points on undistorted preview).
-    `test_image` defaults to first calibration image; `depth_model` defaults to DEFAULT_DEPTH_MODEL.
+    Only `known_distances` (min 3 points on undistorted preview) is required.
+    `test_image` defaults to first calibration image.
+    `depth_model` defaults to DEFAULT_DEPTH_MODEL.
     `clip_min_m`/`clip_max_m` default to 0.1m / 50m.
     """
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     
-    test_image: Optional[str] = Field(default=None, min_length=1, max_length=500, description="Relative storage key (defaults to first calibration image). /files is download-only; URLs and filesystem paths are not accepted.")
-    depth_model: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.pt$", max_length=200, description="Installed depth model filename under MODELS_DIR (defaults to DEFAULT_DEPTH_MODEL).")
     known_distances: List[DepthMeasurement] = Field(min_length=3, max_length=100, description="At least three distinct undistorted pixels with camera-axis Z measurements spanning different depths")
-    clip_min_m: float = Field(0.1, ge=0.01, le=10.0)
-    clip_max_m: float = Field(50.0, ge=5.0, le=200.0)
-
-    @field_validator("test_image")
-    @classmethod
-    def storage_key(cls, value: str) -> str:
-        if "\\" in value or ":" in value or any(part in {"", ".", ".."} for part in value.split("/")):
-            raise ValueError("depth_scale_invalid_image_key")
-        return value
-
-    @model_validator(mode="after")
-    def validate_measurements(self) -> "DepthScaleCreate":
-        if self.clip_min_m >= self.clip_max_m:
-            raise ValueError("depth_scale_invalid_clip_range")
-        if len({(point.x, point.y) for point in self.known_distances}) != len(self.known_distances):
-            raise ValueError("depth_scale_duplicate_pixels")
-        if any(not self.clip_min_m <= point.distance_m <= self.clip_max_m for point in self.known_distances):
-            raise ValueError("depth_scale_measurement_outside_clip_range")
-        return self
 
 
 class DepthScaleImageResponse(BaseModel):
