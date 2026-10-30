@@ -1,5 +1,6 @@
 import asyncio
 import io
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -16,6 +17,7 @@ from api.services import depth_scale_service as service, depth_service
 from api.services.image_service import encode_image
 from api.services.prediction_orchestrator import prepare_prediction_image
 from api.services.vision_process_service import VisionError
+from api.services.depth_model_service import depth_model_identity
 
 
 def body(**changes):
@@ -41,12 +43,30 @@ def raw_depth():
     return np.tile(np.arange(64, dtype=np.float32) / 10 + 0.01, (48, 1))
 
 
+def inference_result(payload):
+    result = service.fit_depth_scale(raw_depth(), DepthScaleCreate.model_validate(payload["body"]))
+    result["model_identity"] = depth_model_identity(Path(payload["model_path"]), payload["imgsz"])
+    return result
+
+
 def test_linear_fit_and_signed_residuals():
     result = service.fit_depth_scale(raw_depth(), body())
     assert result["scale_s"] == pytest.approx(2)
     assert result["offset_b"] == pytest.approx(.98)
     assert result["max_residual_m"] < 1e-6
     np.testing.assert_allclose(result["residuals"], [0, 0, 0], atol=1e-6)
+
+
+@pytest.mark.parametrize("changes", [
+    {"known_distances": [{"x": 10, "y": 10, "distance_m": z} for z in (3., 5., 7.)]},
+    {"clip_min_m": 8, "clip_max_m": 2},
+    {"clip_max_m": 6}, {"clip_min_m": float("nan")},
+    {"test_image": "../private.png"}, {"test_image": "https://example.org/image.png"},
+    {"depth_model": "../model.pt"},
+])
+def test_creation_rejects_duplicate_pixels_bounds_and_unsafe_sources(changes):
+    with pytest.raises(ValidationError):
+        body(**changes)
 
 
 @pytest.mark.parametrize("kind", ["constant", "near_constant", "nan", "inf", "negative", "reverse", "poor", "constant_truth", "bounds"])
@@ -128,7 +148,7 @@ def test_computation_prepares_same_image_as_prediction_and_bounds_process(monkey
         assert mode == "depth-scale" and timeout == settings.DEPTH_SCALE_TIMEOUT_SEC
         assert payload["model_path"] == str(models / "yolo26n-depth.pt")
         received.append(cv2.imread(payload["image_path"]))
-        return service.fit_depth_scale(raw_depth(), body())
+        return inference_result(payload)
     runner = AsyncMock(side_effect=process)
     monkeypatch.setattr(service, "run_vision", runner)
     request = body()
@@ -150,12 +170,14 @@ def test_vision_process_calls_actual_adapter(monkeypatch, tmp_path, capsys):
     image = np.zeros((48, 64, 3), np.uint8)
     filename = tmp_path / "image.png"
     filename.write_bytes(encode_image(image, ".png"))
+    weights = tmp_path / "installed.pt"
+    weights.write_bytes(b"dummy weights; inference is mocked")
     def inference(received, model, imgsz, device):
         print("library diagnostic")
-        assert received.shape == image.shape and model == "installed.pt" and device == "cpu"
+        assert received.shape == image.shape and model == str(weights) and device == "cpu"
         return raw_depth()
     monkeypatch.setattr(depth_service, "predict_depth", inference)
-    payload = {"image_path": str(filename), "model_path": "installed.pt", "imgsz": 768,
+    payload = {"image_path": str(filename), "model_path": str(weights), "imgsz": 768,
                "body": body().model_dump(), "max_mean": .25, "max_residual": .5, "max_relative": .1}
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
     monkeypatch.setattr(sys, "argv", ["vision_process", "depth-scale"])

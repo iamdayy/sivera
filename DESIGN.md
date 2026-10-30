@@ -61,7 +61,7 @@ This is a conceptual view. Preserve the service interfaces and ordering actually
 - `api/core/database.py`: async engine/session lifecycle and database initialization.
 - `api/core/security.py`: API-key validation and scope checks.
 - `api/core/storage.py`: artifact storage abstraction.
-- `api/models/orm.py`: SQLAlchemy entities, including cameras, calibrations, ground references/models, depth scales, prediction jobs/outputs, detected instances, volume estimates, and API keys.
+- `api/models/orm.py`: SQLAlchemy entities, including cameras, calibrations, ground references/models, depth scales, registered previews, prediction jobs/outputs, detected instances, volume estimates, and API keys.
 - `api/schemas/`: request/response models.
 - `api/routes/cameras.py`: camera registry and metadata.
 - `api/routes/streams.py`: stream desired state and authenticated WHEP proxy.
@@ -94,7 +94,7 @@ This is a conceptual view. Preserve the service interfaces and ordering actually
 ## 6. API contract and current caveats
 
 - Authentication uses the `X-API-Key` header. Keys may be configured through `VALID_API_KEYS` and/or stored hashed in the database. Scope checks cover camera, calibration, ground-reference, and prediction operations.
-- Public endpoints are `/`, `/health`, `/docs`, `/redoc`, and `/openapi.json`; `/files` and camera-domain operations require authentication. Missing headers currently return 422, invalid/inactive keys 401, and scope/camera denial 403. Environment-configured keys have wildcard scopes and are not appropriate browser-build secrets.
+- Public endpoints are `/`, `/health`, `/docs`, `/redoc`, and `/openapi.json`; `/files` and camera-domain operations require authentication. Missing headers currently return 422, invalid/inactive/expired database keys 401, and scope/camera denial 403. Environment-configured keys have wildcard scopes and no database expiry; they are not appropriate browser-build secrets.
 - Prefer live `/openapi.json`, route declarations, and schema code over potentially stale README examples.
 - Current route prefixes are mounted explicitly under `/api/v1/cameras` in `api/main.py`, including calibrations, ground references, streams, and predictions. Verify OpenAPI before changing them.
 - Prediction supports `upload`, `rtsp_frame`, and `latest_rtsp` as multipart form sources. The route commits a pending job before Celery dispatch and returns HTTP 202; workers persist `processing -> done/failed`. Broker failure returns 503 and marks the pending job failed. Stale jobs fail rather than being automatically redispatched.
@@ -124,7 +124,7 @@ This is a conceptual view. Preserve the service interfaces and ordering actually
 - Apply schema changes through reviewed migrations; do not rely on startup side effects to mutate production schema.
 - Document container permissions, storage mounts, required environment settings, and external services.
 - API-key hashes, WHEP ownership, and source HMAC depend on the same stable `SECRET_KEY`; replacing it without a migration invalidates stored key hashes and identities.
-- Ground-reference/model/depth-scale routers now enforce camera-bound keys. Remaining legacy gaps include database authentication ignoring `expires_at` and generic artifact fallback branches not enforcing every domain scope/registration. The complete API must not be represented as tenant-isolated. Fix these gaps before multi-tenant production deployment.
+- Ground-reference/model/depth-scale routers enforce camera-bound keys. Database authentication checks UTC expiry. Generic artifact access requires a registered resource and domain read scope; unknown namespaces and orphan keys are denied. Multi-organization ownership/isolation remains outside the current product scope.
 
 ## 9. Testing strategy
 
@@ -142,7 +142,7 @@ A backend change is complete when it preserves or documents API compatibility, i
 ## 11. MediaMTX integration (phase 1)
 
 - `Camera.stream_enabled` persists desired state, default false. Source remains private; camera responses return `rtsp_url=null`, `rtsp_configured`, and `stream_enabled`. The dashboard must not overwrite an unchanged source with null.
-- Exact source hostname/IP allowlist is no longer enforced by the API; RTSP/RTSPS only, TCP pulls and on-demand sources are still validated. Deployment must enforce camera-network egress limits independently.
+- Per the user's 26 October 2026 decision, all RTSP/RTSPS hostnames/IPs are accepted and `MEDIAMTX_ALLOWED_RTSP_HOSTS` is unused. URL scheme/host/port/fragment validation, TCP pulls, on-demand sources, authentication, scopes, and camera binding still apply.
 - Owned paths are `sivera_<UUID>`. A PostgreSQL advisory transaction lock serializes reconcilers across API processes. Only canonical UUID namespace paths are removed, never unrelated paths. Failed sync is retried periodically; camera changes commit before background reconciliation.
 - WHEP OPTIONS/POST/PATCH/DELETE require API key and camera:read, with camera-bound key restrictions. PostgreSQL `StreamSession` maps a public UUID to the private MediaMTX secret and an HMAC of the owning API key. PATCH/DELETE reauthenticate ownership, including across API workers/restarts. Absolute session TTL and cleanup are bounded by reconciliation; DELETE clears upstream before removing mapping.
 - Upstream API and reader credentials are separate. No anonymous public read/publish. Loopback-only admin exists for container healthcheck. HTTP ports are localhost-only on the host; UDP ICE 8189 is published. Dashboard signaling is HTTPS through FastAPI in production; media goes directly to MediaMTX. TURN/TCP are deployment-specific.
@@ -167,6 +167,8 @@ A backend change is complete when it preserves or documents API compatibility, i
 - `GET .../images/{image_id}/preview` draws detected corners on the original frame and requires `calibration:read`. `POST .../{session_id}/compute` requires `calibration:write` and a terminal capture with enough accepted frames (stored frames for legacy sessions, then quality assessed). Repeat requests do not duplicate queued/running/done computations; failed computations may be explicitly retried.
 - `auto_calibrate=false` by default. True queues computation when capture completes, stops, or expires; insufficient usable views fail safely. Failed captures are not automatically computed. Computation has its own persistent outbox, atomic claim, token fence, queue timeout, and wall-clock timeout. Killable subprocesses with coreutils `timeout` bound OpenCV assessment/computation even after a Celery child dies.
 - Camera-row locks serialize calibration version allocation and activation. Capture computations create inactive results and never replace active calibration. Existing multipart upload calibration remains synchronous and auto-activates on success; it now also stores `k_original`, `k_undist`, resolution, alpha, and per-view errors. Legacy `k_matrix` remains the undistorted K. RMS/per-view errors use pixels; stored coverage uses percentages.
+- Calibration preview repair (29 October 2026): the on-demand undistort endpoint previously returned generated/cached files without `PreviewArtifact` registration, so authenticated `/files` returned 404 even when bytes existed. It now locks the calibration row, reuses only registered existing previews, regenerates unregistered files from the source, and commits registration before returning a URL. A registered preview with missing bytes is regenerated without duplicate metadata. API paths/schemas and calibration activation remain the same.
+- Preview verification: 42 focused tests passed (`test_calibration_preview.py`, `test_prediction_access.py`, `test_api.py`, with mocked database dependencies), and two `test_calibration_preview_integration.py` cases passed against disposable PostGIS with real migrations, database API keys, local storage, OpenCV, and ASGI HTTP. They cover concurrent generation, legacy cache recovery, missing-file recovery, repeat downloads, scope/camera denial, and parent deletion. Live local backend returned HTTP 200 for metadata and JPEG; the dashboard's Chromium preview action opened and decoded the real 1920×1080 image without page errors. S3 and physical calibration accuracy were not tested in this repair.
 - RTSP source HMAC is private, checked during capture/computation and again under a camera-row lock before final persistence. API and all workers require the same stable `SECRET_KEY`. Changing it invalidates old source identities and WHEP ownership. Relay configuration is checked before capture without modifying MediaMTX paths; unsynced source changes must reconcile first. Focus, zoom, camera pose, and firmware stream settings still need operator control; unchanged URLs cannot detect those physical changes.
 
 ## 14. RTSP snapshots and predictions (phase 4)
@@ -196,7 +198,7 @@ Preview/download requests require header authentication; an `<img src>` or ordin
 
 OpenAPI custom generation derives security from FastAPI's actual `X-API-Key` dependency parameter, removes that duplicate header parameter after registering `ApiKeyAuth`, and leaves public operations with `security: []`. Root/health now have explicit response schemas; binary artifact/output endpoints expose their actual content types; WHEP documents SDP, ICE fragments, response headers, and optional `If-Match`. Field documentation preserves raw/undistorted coordinates, capture/compute distinctions, freshness, and multipart output selection without changing their wire formats.
 
-This contract/documentation update adds no persistence fields or migration; revision `005_capture_quality_snapshots` remains the migration head. Dashboard implementation is not part of the handoff.
+The original contract-only handoff added no persistence fields. The 26 October alignment adds revisions 006 and 007, described below; current migration head is `007_preview_artifacts`.
 
 Generate the contract from the repository root:
 
@@ -204,7 +206,7 @@ Generate the contract from the repository root:
 python api/scripts/export_openapi.py openapi.json
 ```
 
-The exporter imports the app in a child process with an empty environment and a temporary working directory without `.env`, without contacting PostgreSQL/storage/MediaMTX or starting lifespan tasks. This also bypasses invalid local settings before the initial configuration import. The checked-in snapshot is reproducible and secret-free; a deployment can change configuration-derived defaults or dependency-version serialization, so live `/openapi.json` remains authoritative. The backend publishes `openapi.json`; the dashboard team owns copying/regenerating its contract and implementation. The depth-scale repair does not modify dashboard files. See `docs/depth-scale-dashboard-handoff.md` for its required changes. Historical dashboard plans and documentation may describe obsolete prefixes or RTSP behavior.
+The exporter imports the app in a child process with an empty environment and a temporary working directory without `.env`, without contacting PostgreSQL/storage/MediaMTX or starting lifespan tasks. This also bypasses invalid local settings before the initial configuration import. The checked-in snapshot is reproducible and secret-free; a deployment can change configuration-derived defaults or dependency-version serialization, so live `/openapi.json` remains authoritative. The backend publishes `openapi.json`; dashboard adapters/types live in `../sivera-dashboard`. The 26 October alignment updates that separate repository's source-key and identity-recovery handling. See `docs/depth-scale-dashboard-handoff.md`. Historical plans may describe obsolete prefixes or RTSP behavior.
 
 ## 16. Verification and local database operation (22 October 2026)
 
@@ -214,9 +216,11 @@ The user separately authorized discarding SIVERA application data in `waste_db` 
 
 Final database verification found the expected revision and 14 empty application tables, including database API keys; ORM column types/nullability and principal constraints/active-capture uniqueness matched. PostGIS extensions, 37 reference tables, and 8,500 `spatial_ref_sys` rows were retained. Artifact files, other databases, `.env`, local PostgreSQL, and the original container configuration were not changed. The maintenance container was stopped/removed without deleting the volume. This is a dated operation record, not a destructive setup recipe or proof of the current deployed database state.
 
-The original `waste-postgres` remains stopped with its 5432 binding conflict unresolved; existing local `DATABASE_URL` reaches the other PostgreSQL and rejects authentication. Database API keys must be provisioned again, and retained artifact files can be orphaned. MediaMTX passwords were empty in the inspected `.env`; deployment still needs credentials, allowlist, shared non-default secret, correct database target/port, writable shared storage, CORS/HTTPS/ICE settings, model weights, and real camera/browser verification.
+At that inspection, `waste-postgres` remained stopped with its 5432 binding conflict unresolved; local `DATABASE_URL` reached the other PostgreSQL and rejected authentication. Database API keys needed provisioning again, and retained artifact files could be orphaned. MediaMTX passwords were empty in the inspected `.env`; deployment needed credentials, shared non-default secret, correct database target/port, writable shared storage, CORS/HTTPS/ICE settings, model weights, and real camera/browser verification. This is the 22 October record, not a fresh deployment probe.
 
 ## 17. Depth-scale provisioning repair (24 October 2026)
+
+Historical implementation record; the 26 October alignment below supersedes its identity and preview-persistence details.
 
 - `/files` is download-only. Test-image upload accepts JPEG/PNG/BMP, bounded by upload bytes and decoded pixels, at exact calibration dimensions. Explicit calibrations receive raw images and undistort before both preview and model inference. Legacy calibrations require already-undistorted images at camera dimensions. Incomplete original intrinsics, invalid matrices, and target K inconsistent with registered K are rejected.
 - Upload returns a ground-model/camera-bound source key and authenticated PNG preview. Original bytes and preview use the shared storage backend, including private S3. JSON creation accepts these source keys or exact keys registered in the selected calibration's `calib_images`; it rejects filesystem paths, URLs, arbitrary keys, and cross-camera images. BEV uses storage keys and the same bounded image preparation; optional masks are already-undistorted at matching dimensions and require their own artifact read scope.
@@ -270,6 +274,26 @@ Before claiming that volume estimation is accurate:
 5. Report MAE/RMSE and relative error where appropriate, alongside failures and excluded samples.
 6. Document limits and repeatability. A successful API job or accepted depth-scale fit is not a substitute for this evaluation.
 
+
+## 19. Measurement and contract alignment (26 October 2026)
+
+- Creation now accepts `test_image`, `depth_model`, `clip_min_m`, and `clip_max_m` alongside measurements. An uploaded source key selects that image even if the calibration has another image or none. Omitting it retains the first-calibration-image fallback. Source authorization and exact raw/undistorted dimensions apply before inference.
+- Migration `006_depth_model_identity` adds nullable JSON identity and fit provenance. Identity contains weights SHA256, Ultralytics/Torch/OpenCV versions, preprocessing version, camera-axis convention, and inference size. Provenance stores the source key, prepared-image SHA256, measured points, and acceptance thresholds privately. Existing rows remain null and require a new measured fit.
+- Creation, active GET, activation, prediction submission, and depth execution check the saved identity against installed weights/preparation. The depth cache reloads a changed file at the same path; changes during inference are rejected. Active GET/activation return 409 for missing identity, changed model, or invalid saved fit and 503 for unavailable weights. Historical list/detail reads remain available.
+- [Ultralytics depth documentation](https://docs.ultralytics.com/tasks/depth/) explicitly distinguishes viewing-axis depth from rangefinder distance and describes a global calibration baked into released YOLO26 depth weights. The installed 8.4.182 `DepthPredictor` stretches inputs and returns an image-aligned map. SIVERA applies its existing additional linear correction; whether that improves held-out physical measurements is still unverified. A fingerprint records model identity, not the truth of custom-model training labels or physical accuracy.
+- Migration `007_preview_artifacts` registers uploaded depth source/preview pairs, calibration previews, and BEV previews against exactly one calibration or ground model. Foreign keys cascade metadata on parent deletion. Original calibration images remain registered through `calib_images`. No legacy preview ownership is guessed; regenerate old unregistered previews. Files survive metadata deletion and interrupted writes, and physical cleanup stays an operator task.
+- Database-key expiry uses UTC and rejects equality with the expiry instant. `/files` has no permissive unknown-namespace fallback; resource registration, camera binding, and domain scope are required. Upload/RTSP decoders select accepted Pillow formats directly, avoiding Ultralytics' global `Image.open` plugin auto-install path on corrupt input.
+- Instance segmentation validates task, mask/box consistency, and class IDs. Aggregate volume uses the union of selected waste masks. Mask metadata records union/overlapping-membership pixels and morphology additions/removals. Per-instance results can overlap; operational class definitions and real-image morphology performance remain unverified.
+- Grid grouping sorts cell IDs instead of rescanning every point per cell. Cell median, minimum support (default two), holes (NaN, no interpolation), full boundary-cell area, and the 1,000,000-cell cap are preserved. Unsupported/nonpositive aggregate estimates remain unavailable. Synthetic prisms cover 0.025/0.05/0.10 m cells and multiple support thresholds. A local 100,000-point 80×80-grid benchmark (median of three runs) measured 0.510247 s before and 0.088148 s after, with identical grids; this is not a production throughput result.
+
+### Docker verification (26 October 2026)
+
+- Current source mounted read-only into the existing backend image passed **354 tests, with 15 opt-in skips**. A separate disposable PostgreSQL/PostGIS, Redis/Celery, and MediaMTX run passed **14 integration tests, with 1 skip** requiring real depth weights. PostgreSQL was 16.4 with PostGIS 3.4.3; MediaMTX remained `1.20.0-ffmpeg`.
+- Real-database checks covered migration upgrade/downgrade through `007_preview_artifacts`, legacy-null identity, JSONB artifact authorization, preview parent constraints/cascades, concurrent depth activation, and prediction pins. Synthetic RTSP capture, WHEP signaling, queue/failure paths, and a disposable worker-child crash were exercised.
+- HTTP smoke with application lifespan enabled returned healthy/connected `/health` and an exact OpenAPI snapshot match. Database-key expiry, missing/invalid credentials, scope/camera denials, registered/orphan file access, legacy identity recovery, upload, authenticated preview, and metadata cascade behavior passed.
+- Successful prediction integration uses mocked depth/segmentation inference. Real weights, browser ICE/playback with field cameras, custom-class semantics, and held-out physical volume accuracy remain unverified. The four disposable containers were removed; other containers and volume inventory were unchanged during cleanup. XML/JSON results and logs are retained in `/tmp/opencode/sivera-docker-verify/`.
+
+Execution details, checks, and pending physical validation are recorded in `.agents/plan/2026-10-26-design-agents-alignment.md`. The companion dashboard plan is `../sivera-dashboard/.agents/plan/2026-10-26-depth-contract-alignment.md`. No user database migration is implied by this implementation record.
 
 ## User management and organization scope
 

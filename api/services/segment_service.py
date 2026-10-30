@@ -62,20 +62,30 @@ def predict_instances(
     if model_path not in _seg_model_cache:
         _seg_model_cache[model_path] = YOLO(model_path)
     model = _seg_model_cache[model_path]
+    if model.task != "segment":
+        raise ValueError("prediction_invalid_segmentation")
     
     r = model.predict(source=image_bgr, device=device, imgsz=imgsz, conf=conf, iou=iou, verbose=False)[0]
     
     out = []
     if r.masks is not None:
+        if r.boxes is None or len(r.masks.xy) != len(r.boxes.cls):
+            raise ValueError("prediction_invalid_segmentation")
         cls = r.boxes.cls.cpu().numpy().astype(int)
         cf = r.boxes.conf.cpu().numpy()
         for poly, c, p in zip(r.masks.xy, cls, cf):
+            if (np.asarray(poly).ndim != 2 or np.asarray(poly).shape[1] != 2
+                    or not np.isfinite(poly).all() or not np.isfinite(p)
+                    or int(c) not in model.names):
+                raise ValueError("prediction_invalid_segmentation")
             if len(poly) >= 3:
                 out.append(dict(
                     cls=model.names[int(c)],
                     conf=float(p),
                     poly=np.asarray(poly, np.float32)
                 ))
+    elif r.boxes is not None and len(r.boxes.cls):
+        raise ValueError("prediction_invalid_segmentation")
     return out, model.names
 
 
@@ -149,10 +159,18 @@ async def run_segmentation(
     class_masks_dict = class_masks(instances, (h, w))
     
     # Combined waste mask
-    waste_mask = clean_mask(
-        waste_mask_from(instances, (h, w), waste_classes),
-        open_px=0, close_px=5, min_area_px=30
-    )
+    raw_mask = waste_mask_from(instances, (h, w), waste_classes)
+    waste_mask = clean_mask(raw_mask, open_px=0, close_px=5, min_area_px=30)
+    selected = {norm(name) for name in waste_classes}
+    selected_pixels = sum(int(rasterize([item["poly"]], (h, w)).sum())
+                          for item in instances if norm(item["cls"]) in selected)
+    diagnostics = {
+        "raw_union_pixels": int(raw_mask.sum()),
+        "overlap_pixels": selected_pixels - int(raw_mask.sum()),
+        "removed_pixels": int((raw_mask & ~waste_mask).sum()),
+        "added_pixels": int((waste_mask & ~raw_mask).sum()),
+        "open_px": 0, "close_px": 5, "min_area_px": 30,
+    }
     
     # Save individual class masks
     for cls_name, cls_mask in class_masks_dict.items():
@@ -191,4 +209,5 @@ async def run_segmentation(
         "instances_json_key": inst_key,
         "total_waste_pixels": int(waste_mask.sum()),
         "waste_fraction": float(waste_mask.mean()),
+        "mask_diagnostics": diagnostics,
     }

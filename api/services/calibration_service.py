@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
-from api.models.orm import Calibration, Camera
+from api.models.orm import Calibration, Camera, PreviewArtifact
 from api.services.calibration_quality_service import detect_chessboard
 
 logger = logging.getLogger(__name__)
@@ -273,5 +273,6 @@ async def process_calibration_upload(
                 raise RuntimeError("Failed to encode calibration preview image")
             buf = io.BytesIO(buf_arr.tobytes())
             storage.save(preview_key, buf, "image/jpeg")
+            db.add(PreviewArtifact(storage_key=preview_key, calibration_id=calibration.id))
         
         return calibration

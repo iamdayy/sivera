@@ -3,6 +3,8 @@ import json
 import sys
 from dataclasses import asdict
 
+import numpy as np
+
 from api.core.config import Settings
 from api.services.calibration_quality_service import assess_frame
 from api.services.calibration_service import calibrate_from_points
@@ -25,6 +27,9 @@ def main() -> None:
             from api.schemas.ground_ref import DepthScaleCreate
             from api.services.depth_service import predict_depth
             from api.services.depth_scale_service import fit_depth_scale
+            from api.services.depth_model_service import depth_model_identity
+            from pathlib import Path
+            identity = depth_model_identity(Path(payload["model_path"]), payload["imgsz"])
             config = Settings(_env_file=None, DEPTH_SCALE_MAX_MEAN_RESIDUAL_M=payload["max_mean"],
                               DEPTH_SCALE_MAX_RESIDUAL_M=payload["max_residual"],
                               DEPTH_SCALE_MAX_RELATIVE_RESIDUAL=payload["max_relative"])
@@ -32,11 +37,54 @@ def main() -> None:
             with contextlib.redirect_stdout(sys.stderr):
                 depth = predict_depth(cv2.imread(payload["image_path"]), payload["model_path"], payload["imgsz"], "cpu")
             result = fit_depth_scale(depth, DepthScaleCreate.model_validate(payload["body"]), config)
+            if depth_model_identity(Path(payload["model_path"]), payload["imgsz"]) != identity:
+                raise ValueError("depth_scale_model_mismatch")
+            result["model_identity"] = identity
+        elif sys.argv[1] == "depth-preview":
+            import contextlib
+            import cv2
+            from api.services.depth_service import predict_depth, depth_colormap
+            from api.services.depth_model_service import depth_model_identity
+            from pathlib import Path
+            import uuid
+            identity = depth_model_identity(Path(payload["model_path"]), payload["imgsz"])
+            # Model libraries may print to stdout; reserve stdout for the JSON protocol.
+            with contextlib.redirect_stdout(sys.stderr):
+                depth = predict_depth(cv2.imread(payload["image_path"]), payload["model_path"], payload["imgsz"], "cpu")
+            # Generate depth visualization
+            depth_vis = depth_colormap(depth)
+            # Encode visualization as base64
+            import io
+            from api.services.image_service import encode_image
+            vis_buf = io.BytesIO(encode_image(depth_vis, ".png"))
+            vis_b64 = base64.b64encode(vis_buf.getvalue()).decode()
+            # Encode raw depth as base64
+            depth_bytes = depth.astype(np.float32).tobytes()
+            depth_b64 = base64.b64encode(depth_bytes).decode()
+            # Generate unique ID for this preview
+            depth_image_id = str(uuid.uuid4())
+            # Depth stats
+            depth_stats = {
+                "min": float(depth.min()),
+                "max": float(depth.max()),
+                "mean": float(depth.mean()),
+            }
+            result = {
+                "depth_image_id": depth_image_id,
+                "visualization": vis_b64,
+                "depth_raw": depth_b64,
+                "width": depth.shape[1],
+                "height": depth.shape[0],
+                "depth_stats": depth_stats,
+                "model_identity": identity,
+            }
+            if depth_model_identity(Path(payload["model_path"]), payload["imgsz"]) != identity:
+                raise ValueError("depth_scale_model_mismatch")
         else:
             raise ValueError("vision_failed")
     except ValueError as exc:
         code = str(exc)
-        result = {"error": code if code in {"calibration_insufficient_images", "calibration_invalid_corners", "calibration_invalid_result", "calibration_invalid_parameters", "depth_scale_invalid_depth", "depth_scale_pixel_out_of_bounds", "depth_scale_degenerate_fit", "depth_scale_poor_fit"} else "vision_failed"}
+        result = {"error": code if code in {"calibration_insufficient_images", "calibration_invalid_corners", "calibration_invalid_result", "calibration_invalid_parameters", "depth_scale_invalid_depth", "depth_scale_pixel_out_of_bounds", "depth_scale_degenerate_fit", "depth_scale_poor_fit", "depth_scale_model_mismatch", "depth_model_unavailable"} else "vision_failed"}
     except Exception:
         result = {"error": "vision_failed"}
     print(json.dumps(result, allow_nan=False))

@@ -23,7 +23,7 @@ from api.routes import ground_refs
 from api.services import depth_scale_service, depth_service
 from api.services.image_service import encode_image
 from api.services.prediction_orchestrator import prepare_prediction_image, submit_prediction_job
-from tests.test_depth_scale_service import raw_depth, body
+from tests.test_depth_scale_service import raw_depth, body, inference_result
 
 
 def test_real_cpu_depth_adapter_and_bounded_calibration(monkeypatch, tmp_path):
@@ -70,7 +70,7 @@ def test_postgres_create_activate_concurrency_and_prediction_pins(monkeypatch, t
     async def inference(mode, payload, timeout):
         from api.schemas.ground_ref import DepthScaleCreate
         await asyncio.sleep(.02)
-        return depth_scale_service.fit_depth_scale(raw_depth(), DepthScaleCreate.model_validate(payload["body"]))
+        return inference_result(payload)
     monkeypatch.setattr(depth_scale_service, "run_vision", inference)
     key = SimpleNamespace(camera_id=None, scopes=["ground_ref:read", "ground_ref:write"])
     previous = app.dependency_overrides.copy()
@@ -117,7 +117,7 @@ def test_postgres_create_activate_concurrency_and_prediction_pins(monkeypatch, t
                         await submit_prediction_job(db, camera_id, "upload")
                 uploaded = await client.post(prefix + "/test-images", files={"file": ("image.png", encode_image(np.zeros((48, 64, 3), np.uint8), ".png"))})
                 assert uploaded.status_code == 201, uploaded.text
-                request = body().model_dump()
+                request = body(test_image=uploaded.json()["test_image"]).model_dump()
                 created = []
                 for _ in range(2):
                     response = await client.post(prefix, json=request)

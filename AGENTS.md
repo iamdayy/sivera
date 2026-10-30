@@ -72,9 +72,10 @@ Important paths:
 - Ensure artifact URLs match the configured storage/static-serving mechanism.
 - Enforce upload size limits and avoid unbounded memory use for large images.
 - Never commit real `.env` values, API keys, credentials, model secrets, or camera RTSP credentials.
-- Migration head is `005_capture_quality_snapshots`. `create_all` at startup does not upgrade existing tables. A database without Alembic history requires a schema/baseline audit; never blindly `stamp head` or reset it. The authorized local reset on 22 October 2026 was a one-off operation, not permission to repeat it.
+- Migration head is `007_preview_artifacts`: 006 adds nullable depth model identity/provenance; 007 registers previews against exactly one calibration/ground model. Legacy scales need a new fit and unregistered previews need regeneration. `create_all` at startup does not upgrade existing tables. A database without Alembic history requires a schema/baseline audit; never blindly `stamp head` or reset it. The authorized local reset on 22 October 2026 was a one-off operation, not permission to repeat it.
 - API and all workers share one writable storage root/private bucket. Compose defines separate `capture`, `calibration`, and `prediction` queues; prediction also drains legacy `celery`. Per-task async engines use NullPool to avoid cross-fork/event-loop pooled connections.
 - Artifact files survive database/camera deletion and can become orphaned after interrupted writes. Retention and physical cleanup are operator tasks. Never silently delete files while migrating metadata.
+- Calibration undistort previews are cached only when both the file and its `PreviewArtifact` registration exist. The preview endpoint regenerates unregistered legacy files from the calibration source and commits registration before returning the URL; serialize generation under the calibration row lock. Keep `/files` registration and scope checks intact.
 
 ## Security and deployment
 
@@ -86,8 +87,8 @@ Important paths:
 - Do not accidentally commit generated data, private images, model weights, or secrets.
 - All API/workers must share one stable non-default `SECRET_KEY`, used for database key hashes, WHEP ownership, and RTSP source HMAC. Rotation invalidates old identities and key hashes unless deliberately migrated.
 - WHEP OPTIONS/POST/PATCH/DELETE require `camera:read`; PATCH/DELETE also require the same owning key. Use the rewritten backend `Location`, never internal MediaMTX URLs. Do not automatically retry offer POST. ICE/media reachability and codec compatibility need browser testing.
-- Use exact RTSP/RTSPS hostname allowlists plus deployment egress restrictions. MediaMTX admin/reader credentials are distinct and never sent to the dashboard. Authenticated image previews need header-bearing fetch/blob URLs; do not put API keys in query strings.
-- Ground-reference/model/depth-scale routers enforce camera-bound key restrictions. Known legacy gaps: database-key `expires_at` is not checked by authentication; generic `/files` fallback branches do not enforce a domain read scope/registration for every possible key shape. Do not claim complete tenant isolation or expiry enforcement. Coordinate focused fixes and regression tests before a multi-tenant production rollout.
+- Per the user's 26 October 2026 decision, accept every RTSP/RTSPS hostname/IP; `MEDIAMTX_ALLOWED_RTSP_HOSTS` is unused. Preserve URL scheme/port/fragment validation, authentication, scopes, and camera binding. MediaMTX admin/reader credentials are distinct and never sent to the dashboard. Authenticated image previews need header-bearing fetch/blob URLs; do not put API keys in query strings.
+- Database keys expire at `expires_at <= now` in UTC; configured wildcard keys have no database expiry. Ground-reference/model/depth-scale routers enforce camera-bound keys. `/files` requires a registered domain resource and its read scope, including preview registration; unknown namespaces and orphan files are denied. This remains a single-organization API, not a tenant-isolation guarantee.
 
 ## Code quality
 
@@ -129,9 +130,9 @@ Do not claim tests passed unless they were run. If GPU, model weights, or extern
 
 Separate **confirmed code defects** from **assumptions that require evidence**. Do not claim measurement accuracy from unit labels, successful inference, or passing mocked tests.
 
-### Confirmed cross-repository issue
+### Cross-repository readiness invariant
 
-- In the dashboard repository, `src/services/readiness.ts` checks an `activeGroundModelId` that is initialized to null and never assigned. Coordinate with `iamdayy/sivera-dashboard` to fix it and add regression tests. Keep backend prerequisite behavior authoritative and consistent.
+- The earlier unassigned `activeGroundModelId` defect is fixed in the current dashboard. `measurementContext.ts` resolves actual active IDs before readiness checks. Retain compatibility/missing-resource regressions and the 409 recovery cases `depth_scale_identity_missing`, `depth_scale_model_mismatch`, and `depth_scale_invalid_saved_fit`. Keep backend prerequisite behavior authoritative.
 
 ### Depth semantics and calibration
 
@@ -141,11 +142,14 @@ Separate **confirmed code defects** from **assumptions that require evidence**. 
 4. Do not apply an extra scale/bias correction merely because it is available. Verify whether the model already provides metric depth, whether the calibration is needed, and whether the fitted correction improves held-out physical measurements.
 5. Add tests for coordinate convention, units, finite/positive values, out-of-range clipping, mismatched model identity, and calibration compatibility. Use known synthetic geometry plus measured physical reference cases.
 
+Implementation as of 26 October 2026: depth creation accepts optional `test_image`, `depth_model`, and clipping; omitted source uses the first calibration image. Fits store weights SHA256, Ultralytics/Torch/OpenCV versions, preprocessing version, `camera_axis_z`, and inference size, plus private source/image digest/measurements/threshold provenance. Creation, active GET, activation, submission, and inference validate compatibility. Weight replacement reloads the cache. Legacy null identity is not backfilled. Raw/corrected nonpositive or nonfinite depth is rejected before clipping. Ultralytics documents camera-axis depth and baked-in global calibration; the benefit of SIVERA's additional linear correction still requires held-out physical evidence.
+
 ### Segmentation contract
 
 - Confirm whether the configured model returns instance masks or semantic class maps. The consumer contract must match the actual output; an instance API such as `r.masks.xy` is not interchangeable with a semantic label map.
 - Verify class-ID/name mapping against the model's trained labels. Define operational meanings for categories such as `Sampah_Berserakan` and `Sampah_Overload`; if they describe scene states rather than mutually exclusive waste regions, avoid double-counting overlapping masks.
 - Test morphology and small-component filtering against representative thin, small, occluded, and low-contrast waste. Record removed-pixel/component counts in diagnostics where useful; thresholds are heuristics, not universal truth.
+- The instance adapter checks task/mask/box/class consistency. Aggregate waste masks use a union; mask output metadata includes raw union, overlapping memberships, added/removed pixel counts, and morphology parameters. Per-instance volumes can overlap and must not be summed as independent regions without evidence about class semantics.
 
 ### Volume geometry and validation
 
@@ -153,6 +157,7 @@ Separate **confirmed code defects** from **assumptions that require evidence**. 
 - Test sensitivity at multiple grid sizes (for example 0.025 m, 0.05 m, 0.10 m) and min-point thresholds. Compare against known-volume/physical reference measurements; report absolute and relative error and include multiple pile shapes.
 - The convex-hull implementation that multiplies a 2D footprint hull area by a representative height is a footprint-times-height proxy, not a full 3D convex hull. Name/document it honestly and avoid presenting it as a physically equivalent alternative without validation.
 - Handle empty masks, sparse point clouds, degenerate footprints, invalid depth, and missing cells explicitly. Null/unavailable must not be silently coerced to zero. Bound memory and computation for high-resolution images.
+- Grid grouping uses sorted cell IDs and preserves the previous medians. Default cell side is 0.05 m with at least two points; holes are unfilled and unsupported cells are NaN. Supported boundary cells use full cell area. Dense synthetic prisms at 0.025/0.05/0.10 m verify arithmetic, not physical accuracy.
 
 ### Asynchronous job correctness
 

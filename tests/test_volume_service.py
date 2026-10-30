@@ -12,6 +12,53 @@ from api.services.volume_service import (
 
 
 class TestEstimateVolumeGrid:
+    @pytest.mark.parametrize("cell", [.025, .05, .10])
+    @pytest.mark.parametrize("min_points", [1, 2, 4])
+    def test_dense_prism_has_known_volume_across_grid_sizes(self, cell, min_points):
+        coords = np.linspace(0, 1, 201)
+        X, Y = np.meshgrid(coords, coords)
+        vol, footprint, grid, _ = estimate_volume_grid(X.ravel(), Y.ravel(), np.full(X.size, .5), cell, min_points)
+        assert vol == pytest.approx(.5)
+        assert footprint == pytest.approx(1.)
+        np.testing.assert_allclose(grid, .5)
+
+    def test_holes_sparse_cells_and_partial_boundary_cells(self):
+        X = np.array([0., .01, .1, .11, .22])
+        Y = np.array([0., .01, .1, .11, .22])
+        vol, footprint, grid, info = estimate_volume_grid(X, Y, np.array([1., 3., 2., 4., 9.]), .1, 2)
+        assert vol == pytest.approx(.05)
+        assert footprint == pytest.approx(.02)
+        assert info["shape"] == (3, 3)
+        assert grid[0, 0] == 2 and grid[1, 1] == 3 and np.isnan(grid[2, 2])
+        # The .02 m boundary sliver still uses a full cell area when supported.
+        vol, _, grid, _ = estimate_volume_grid(X, Y, np.ones(5), .1, 1)
+        assert vol == pytest.approx(.03)
+
+    def test_grouping_matches_reference_cell_medians(self):
+        rng = np.random.default_rng(24)
+        X, Y, H = rng.uniform(-.4, .4, (3, 5000))
+        H = np.abs(H)
+        for cell in (.025, .05, .1):
+            _, _, actual, info = estimate_volume_grid(X, Y, H, cell, 5)
+            ix = np.clip(((X - X.min()) / cell).astype(int), 0, info["nx"] - 1)
+            iy = np.clip(((Y - Y.min()) / cell).astype(int), 0, info["ny"] - 1)
+            expected = np.full(actual.shape, np.nan, np.float32)
+            for j, i in np.ndindex(expected.shape):
+                heights = H[(ix == i) & (iy == j)]
+                if len(heights) >= 5:
+                    expected[j, i] = np.median(heights)
+            np.testing.assert_array_equal(actual, expected)
+
+    @pytest.mark.parametrize("kind", ["nan", "negative", "length", "cell", "minimum"])
+    def test_invalid_geometry_is_not_zero(self, kind):
+        X, Y, H = np.zeros(3), np.zeros(3), np.ones(3)
+        if kind == "nan": X[0] = np.nan
+        if kind == "negative": H[0] = -1
+        if kind == "length": X = X[:2]
+        with pytest.raises(ValueError, match="prediction_invalid_"):
+            estimate_volume_grid(X, Y, H, cell_m=0 if kind == "cell" else .1,
+                                 min_pts_per_cell=0 if kind == "minimum" else 2)
+
     def test_known_grid_volume(self, synthetic_lifted_points):
         X, Y, H, uv = synthetic_lifted_points
         vol, footprint, grid_h, info = estimate_volume_grid(
@@ -30,8 +77,8 @@ class TestEstimateVolumeGrid:
         vol, footprint, grid_h, info = estimate_volume_grid(
             X, Y, H, cell_m=0.05, min_pts_per_cell=2
         )
-        assert vol == 0.0
-        assert footprint == 0.0
+        assert vol is None
+        assert footprint is None
         assert grid_h.shape == (1, 1)
         assert info == {}
 
@@ -41,8 +88,8 @@ class TestEstimateVolumeGrid:
         vol, footprint, _, _ = estimate_volume_grid(
             X, Y, H, cell_m=0.5, min_pts_per_cell=8
         )
-        assert vol == 0.0
-        assert footprint == 0.0
+        assert vol is None
+        assert footprint is None
 
     def test_single_point(self):
         X = np.array([0.0])

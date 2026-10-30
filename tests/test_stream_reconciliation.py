@@ -73,9 +73,9 @@ async def test_reconcile_recovers_after_outage(setup):
 
 
 @pytest.mark.anyio
-async def test_removed_allowlist_source_is_deleted(setup):
+async def test_invalid_source_url_path_is_deleted(setup):
     name = stream_path(setup.enabled.id)
     setup.service.list_path_configs.return_value.append({"name": name})
-    setup.service.ensure_path.side_effect = MediaMTXError("rtsp_host_not_allowed", 422)
+    setup.service.ensure_path.side_effect = MediaMTXError("invalid_rtsp_source", 422)
     await stream_service.reconcile_streams(setup.service)
     assert name in {call.args[0] for call in setup.service.delete_path.await_args_list}

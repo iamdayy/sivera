@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 from uuid import UUID
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, JpegImagePlugin
 
 from api.core.config import Settings, settings
 from api.services.mediamtx_service import MediaMTXError, MediaMTXService, desired_path, stream_path
@@ -43,14 +43,14 @@ def decode_frame(content: bytes, config: Settings = settings) -> CapturedFrame:
     if len(content) > config.CAPTURE_MAX_FRAME_BYTES:
         raise CaptureError("capture_frame_too_large")
     try:
-        with Image.open(io.BytesIO(content)) as image:
+        with JpegImagePlugin.JpegImageFile(io.BytesIO(content)) as image:
             width, height = image.size
             if width <= 0 or height <= 0 or width * height > config.CAPTURE_MAX_PIXELS:
                 raise CaptureError("capture_resolution_too_large")
             if image.format != "JPEG":
                 raise CaptureError("capture_invalid_frame")
             image.load()
-    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+    except (SyntaxError, OSError, ValueError, Image.DecompressionBombError):
         raise CaptureError("capture_invalid_frame") from None
     return CapturedFrame(content, width, height, datetime.now(timezone.utc))
 

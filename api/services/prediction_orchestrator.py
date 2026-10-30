@@ -1,5 +1,6 @@
 """Prediction orchestrator: chains all services for the predict pipeline."""
 import io
+import asyncio
 from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
@@ -18,6 +19,8 @@ from api.services.image_service import encode_image
 from api.services.segment_service import run_segmentation
 from api.services.ground_model_service import compute_bev
 from api.services.depth_service import run_depth_pipeline
+from api.services.depth_model_service import validate_scale_model
+from api.services.depth_scale_service import validate_saved_scale
 from api.services.volume_service import save_volume_results, build_job_summary
 
 
@@ -70,7 +73,7 @@ async def run_prediction_pipeline(
         job_id=job.id, output_type="mask",
         file_path=seg_results["mask_key"], mime_type="image/png",
         width=undist.shape[1], height=undist.shape[0],
-        meta={"waste_pixels": seg_results["total_waste_pixels"]}
+        meta={"waste_pixels": seg_results["total_waste_pixels"], "mask_diagnostics": seg_results.get("mask_diagnostics")}
     )
     add_output(mask_output)
     
@@ -247,6 +250,8 @@ async def submit_prediction_job(
     depth_scale = ds_result.scalar_one_or_none()
     if not depth_scale:
         raise ValueError("prediction_requires_depth_scale")
+    await asyncio.to_thread(validate_scale_model, depth_scale)
+    validate_saved_scale(depth_scale)
     
     # Create job
     job = PredictionJob(

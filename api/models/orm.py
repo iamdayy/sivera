@@ -237,6 +237,29 @@ class Calibration(Base):
         return f"<Calibration(id={self.id}, camera_id={self.camera_id}, v={self.version}, active={self.is_active})>"
 
 
+class GroundReferenceSource(Base):
+    __tablename__ = "ground_reference_sources"
+
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    camera_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False, index=True)
+    snapshot_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), ForeignKey("camera_snapshots.id", deferrable=True, initially="DEFERRED"), nullable=False)
+    calibration_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), ForeignKey("calibrations.id", ondelete="CASCADE"), nullable=False, index=True)
+    storage_key: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    image_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    preparation_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "calibration_id", "preparation_version", name="uq_ground_source_preparation"),
+        CheckConstraint("width > 0 AND height > 0 AND size_bytes > 0", name="ck_ground_source_dimensions"),
+    )
+
+
 class GroundReference(Base):
     __tablename__ = "ground_references"
     
@@ -248,6 +271,9 @@ class GroundReference(Base):
         UUID(as_uuid=True), ForeignKey("calibrations.id", ondelete="CASCADE"), nullable=False
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_id: Mapped[Optional[UUIDType]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ground_reference_sources.id", name="fk_ground_reference_source", deferrable=True, initially="DEFERRED"), index=True
+    )
     image_points: Mapped[list] = mapped_column(JSON, nullable=False)  # [[u,v],...]
     world_points: Mapped[list] = mapped_column(JSON, nullable=False)  # [[X,Y],...] meters
     world_units: Mapped[str] = mapped_column(String(10), default="meter", nullable=False)
@@ -310,6 +336,21 @@ class GroundModel(Base):
         return f"<GroundModel(id={self.id}, cam_h={self.cam_height}, pitch={self.pitch_down_deg})>"
 
 
+class PreviewArtifact(Base):
+    __tablename__ = "preview_artifacts"
+
+    storage_key: Mapped[str] = mapped_column(String(1024), primary_key=True)
+    calibration_id: Mapped[Optional[UUIDType]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("calibrations.id", ondelete="CASCADE"), index=True
+    )
+    ground_model_id: Mapped[Optional[UUIDType]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("ground_models.id", ondelete="CASCADE"), index=True
+    )
+    __table_args__ = (
+        CheckConstraint("(calibration_id IS NULL) <> (ground_model_id IS NULL)", name="ck_preview_one_parent"),
+    )
+
+
 class DepthScale(Base):
     __tablename__ = "depth_scales"
     
@@ -321,6 +362,8 @@ class DepthScale(Base):
         UUID(as_uuid=True), ForeignKey("ground_models.id", ondelete="CASCADE"), nullable=False
     )
     depth_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    model_identity: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    fit_provenance: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     scale_s: Mapped[float] = mapped_column(Float, nullable=False)
     offset_b: Mapped[float] = mapped_column(Float, nullable=False)
     residuals: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)

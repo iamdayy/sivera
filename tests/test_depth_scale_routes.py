@@ -14,13 +14,13 @@ from api.core.database import get_db
 from api.core.security import verify_api_key
 from api.core.storage import LocalStorage
 from api.main import app
-from api.models.orm import Calibration, Camera, DepthScale, GroundModel
+from api.models.orm import Calibration, Camera, DepthScale, GroundModel, GroundReference
 from api.routes import ground_refs
 from api.services import depth_scale_service, ground_model_service
 from api.services.image_service import encode_image
 from api.services.prediction_orchestrator import submit_prediction_job, prepare_prediction_image
 from api.services.vision_process_service import VisionError
-from tests.test_depth_scale_service import body, raw_depth
+from tests.test_depth_scale_service import body, raw_depth, inference_result
 
 
 @pytest.fixture
@@ -30,13 +30,18 @@ def setup(monkeypatch, tmp_path):
     image_key = f"cameras/{camera.id}/calib_images/scene.png"
     calibration = SimpleNamespace(id=uuid4(), camera_id=camera.id, k_original=K, k_matrix=K, k_undist=K,
         resolution_w=64, resolution_h=48, dist_coeffs=[.3, -.1, 0, 0, 0], is_active=True, calib_images=[image_key])
+    ground_ref_id = uuid4()
     ground = SimpleNamespace(id=uuid4(), camera_id=camera.id, calibration_id=calibration.id,
         H_i2w=[[.01, 0, 0], [0, .01, 0], [0, 0, 1]], H_w2i=[[100, 0, 0], [0, 100, 0], [0, 0, 1]],
         R_matrix=np.eye(3).tolist(), t_vector=[0, 0, 0], bev_ppm=20, bev_margin_m=.1,
-        cam_height=1, pitch_down_deg=20, ground_ref_id=uuid4(), created_at=datetime.now(timezone.utc), reproj_err_px=0)
+        cam_height=1, pitch_down_deg=20, ground_ref_id=ground_ref_id, created_at=datetime.now(timezone.utc), reproj_err_px=0)
+    # Ground reference for the ground model (legacy, no source_id)
+    ground_ref = SimpleNamespace(id=ground_ref_id, camera_id=camera.id, calibration_id=calibration.id,
+        version=1, source_id=None, image_points=[[10,10],[50,10],[50,30],[10,30]],
+        world_points=[[0,0],[1,0],[1,1],[0,1]], world_units="meter", description=None, is_active=True)
     old = SimpleNamespace(id=uuid4(), camera_id=camera.id, ground_model_id=ground.id, is_active=True,
                           created_at=datetime.now(timezone.utc), **depth_scale_service.fit_depth_scale(raw_depth(), body()))
-    rows = {Camera: camera, Calibration: calibration, GroundModel: ground, DepthScale: old}
+    rows = {Camera: camera, Calibration: calibration, GroundModel: ground, DepthScale: old, GroundReference: ground_ref}
     key = SimpleNamespace(camera_id=None, scopes=["ground_ref:read", "ground_ref:write"])
     db = MagicMock(commit=AsyncMock(), rollback=AsyncMock(), refresh=AsyncMock(), flush=AsyncMock(),
                    scalar=AsyncMock(return_value=ground.id))
@@ -73,8 +78,7 @@ def setup(monkeypatch, tmp_path):
     for module in (ground_refs, depth_scale_service, ground_model_service):
         monkeypatch.setattr(module, "get_storage", lambda: storage)
     async def infer(mode, payload, timeout):
-        from api.schemas.ground_ref import DepthScaleCreate
-        return depth_scale_service.fit_depth_scale(raw_depth(), DepthScaleCreate.model_validate(payload["body"]))
+        return inference_result(payload)
     inference = AsyncMock(side_effect=infer)
     monkeypatch.setattr(depth_scale_service, "run_vision", inference)
     client = TestClient(app, raise_server_exceptions=False)
@@ -111,6 +115,51 @@ def test_upload_preview_create_activate_and_prediction_pins(setup):
     assert job.calibration_id == setup.calibration.id and job.ground_model_id == setup.ground.id
     locked = [call.args[0] for call in setup.db.execute.call_args_list if getattr(call.args[0], "_for_update_arg", None) is not None]
     assert {query.column_descriptions[0]["entity"] for query in locked} >= {Camera, GroundModel, DepthScale}
+
+
+@pytest.mark.parametrize("calibration_images", [True, False])
+def test_creation_uses_uploaded_image_and_requested_parameters(setup, calibration_images):
+    alternate = np.full_like(setup.image, 172)
+    response = setup.client.post(setup.url + "/test-images", files={
+        "file": ("measured.png", encode_image(alternate, ".png"), "image/png"),
+    })
+    uploaded = response.json()
+    if not calibration_images:
+        setup.calibration.calib_images = []
+    from pathlib import Path
+    (Path(settings.MODELS_DIR) / "custom-depth.pt").touch()
+    received = []
+
+    async def inference(mode, payload, timeout):
+        received.append(cv2.imread(payload["image_path"]))
+        assert Path(payload["model_path"]).name == "custom-depth.pt"
+        return inference_result(payload)
+
+    setup.inference.side_effect = inference
+    response = setup.client.post(setup.url, json=dict(setup.request,
+        test_image=uploaded["test_image"], depth_model="custom-depth.pt", clip_min_m=1, clip_max_m=9))
+    assert response.status_code == 201, response.text
+    np.testing.assert_array_equal(received[0], prepare_prediction_image(alternate, setup.calibration, setup.camera, "upload"))
+    assert response.json()["depth_model"] == "custom-depth.pt"
+    assert response.json()["clip_min_m"] == 1
+    assert response.json()["clip_max_m"] == 9
+
+
+def test_creation_rejects_foreign_uploaded_source(setup):
+    source = depth_scale_service.test_image_key(uuid4(), setup.ground.id, uuid4())
+    response = setup.client.post(setup.url, json=dict(setup.request, test_image=source))
+    assert response.status_code == 404
+    setup.inference.assert_not_awaited()
+
+
+def test_orphan_source_and_preview_are_not_readable(setup):
+    image_id = uuid4()
+    source = depth_scale_service.test_image_key(setup.camera.id, setup.ground.id, image_id)
+    setup.storage.save(source, io.BytesIO(setup.encoded))
+    setup.db.scalar.return_value = None
+    assert setup.client.post(setup.url, json=dict(setup.request, test_image=source)).status_code == 404
+    assert setup.client.get(setup.url + f"/test-images/{image_id}/image").status_code == 404
+    setup.inference.assert_not_awaited()
 
 
 @pytest.mark.parametrize(("method", "suffix"), [("get", ""), ("get", "/active"), ("get", "/{id}"),
@@ -159,9 +208,9 @@ def test_inference_failures_are_safe(setup, exception):
 
 
 def test_ground_changed_during_inference_is_not_persisted(setup):
-    async def infer(*args):
+    async def infer(mode, payload, timeout):
         setup.selected.id = uuid4()
-        return depth_scale_service.fit_depth_scale(raw_depth(), body())
+        return inference_result(payload)
     setup.inference.side_effect = infer
     response = setup.client.post(setup.url, json=setup.request)
     assert response.status_code == 409 and response.json()["detail"]["code"] == "depth_scale_prerequisites_changed"
@@ -197,14 +246,14 @@ def test_upload_validation_and_storage_failure(setup, monkeypatch):
 
 
 def test_unregistered_cross_camera_image_is_not_accepted(setup):
-    # Since test_image is no longer in request body, this test is not applicable
-    # The route now uses calibration.calib_images[0] by default
-    pass
+    source = f"cameras/{uuid4()}/calib_images/scene.png"
+    response = setup.client.post(setup.url, json=dict(setup.request, test_image=source))
+    assert response.status_code == 404
+    setup.inference.assert_not_awaited()
 
 
 def test_bev_route_relative_keys_dimensions_and_camera_access(setup):
     url = setup.url.rsplit("/depth-scales", 1)[0] + "/bev-preview"
-    # Use the calibration image key directly since it's no longer in request body
     image_key = setup.calibration.calib_images[0]
     response = setup.client.get(url, params={"test_image_path": image_key})
     assert response.status_code == 200, response.text

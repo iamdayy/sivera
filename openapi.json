@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Waste Volume Estimation API",
-    "description": "## Waste Volume Estimation API\n\nCamera operations are mounted at `/api/v1/cameras`; `/files` serves protected artifacts.\n\n- WebRTC playback uses backend-authenticated WHEP signaling; media flows directly from MediaMTX.\n- RTSP calibration capture selects chessboard frames and queues computation. Computed calibrations are inactive until explicitly activated; multipart calibration upload is synchronous and activates its result.\n- Snapshots preserve original resolution and record worker-reception UTC time, not sensor time.\n- Predictions queue `upload`, `rtsp_frame`, or `latest_rtsp` and persist `pending -> processing -> done/failed`. HTTP 202 acknowledges submission, not completion.\n- Grid volume sums cell median heights times cell area. `convex_hull` means 2D footprint-hull area times median height, not a 3D hull. Volume is m³/L, footprint m², height meters; missing estimates remain null. BEV is a visualization, not a complete 3D reconstruction.\n\n### Authentication\nCamera operations and artifact downloads require `X-API-Key`. `/`, `/health`, `/docs`, `/redoc`, and `/openapi.json` are public. Keys are configured through `VALID_API_KEYS` or stored hashed in PostgreSQL. Environment-configured keys have wildcard scopes and must not be embedded in browser builds. Missing headers currently return 422; invalid keys return 401 and insufficient scopes return 403.\n\n### Scopes\n- `camera:read` / `camera:write` - Camera management\n- `calibration:read` / `calibration:write` - Calibration\n- `ground_ref:read` / `ground_ref:write` - Ground references\n- `predict:read` / `predict:write` - Predictions\n\n### Prediction prerequisites and coordinates\nSubmission pins an active calibration, a ground model linked to an active reference for that calibration, and an active depth scale for that ground model. There is no public depth-scale setup/readiness endpoint; provisioning is an operator task. New calibrations preserve `k_original`, `k_undist`, and dimensions; `k_matrix` remains the undistorted K. Upload raw images for these calibrations. Legacy uploads without original intrinsics require already-undistorted images; RTSP requires recalibration. Ground-reference image points use undistorted coordinates.\n\n### RTSP sources and output selection\n`rtsp_frame` captures at worker execution. `latest_rtsp` requires a fresh persisted snapshot at submission and selects again at execution, without fallback capture. RTSP rejects caller files/timestamps; frame dimensions must exactly match calibration. `return_outputs` is a JSON-array form string: omitted registers all supported outputs, `[]` registers none. Internal files may still be generated; summary/instances/volumes are not filtered. Broker failure returns 503 and marks the job failed; predictions are not automatically redispatched.\n\n### Errors and deployment limits\nErrors use `detail` as a string, an object with a safe `code`, or a validation list. Handle all shapes. Browser video/ICE/reconnect, real-camera accuracy, model/GPU inference, TLS/TURN, and dashboard integration still require deployment testing. Legacy ground-reference/model routes do not yet enforce camera-bound API-key restrictions; do not treat them as tenant-isolated.",
+    "description": "## Waste Volume Estimation API\n\nCamera operations are mounted at `/api/v1/cameras`; `/files` serves protected artifacts.\n\n- WebRTC playback uses backend-authenticated WHEP signaling; media flows directly from MediaMTX.\n- RTSP calibration capture selects chessboard frames and queues computation. Computed calibrations are inactive until explicitly activated; multipart calibration upload is synchronous and activates its result.\n- Snapshots preserve original resolution and record worker-reception UTC time, not sensor time.\n- Predictions queue `upload`, `rtsp_frame`, or `latest_rtsp` and persist `pending -> processing -> done/failed`. HTTP 202 acknowledges submission, not completion.\n- Grid volume sums cell median heights times cell area. `convex_hull` means 2D footprint-hull area times median height, not a 3D hull. Volume is m³/L, footprint m², height meters; missing estimates remain null. BEV is a visualization, not a complete 3D reconstruction.\n\n### Authentication\nCamera operations and artifact downloads require `X-API-Key`. `/`, `/health`, `/docs`, `/redoc`, and `/openapi.json` are public. Keys are configured through `VALID_API_KEYS` or stored hashed in PostgreSQL. Environment-configured keys have wildcard scopes and must not be embedded in browser builds. Missing headers currently return 422; invalid keys return 401 and insufficient scopes return 403.\n\n### Scopes\n- `camera:read` / `camera:write` - Camera management\n- `calibration:read` / `calibration:write` - Calibration\n- `ground_ref:read` / `ground_ref:write` - Ground references\n- `predict:read` / `predict:write` - Predictions\n\n### Prediction prerequisites and coordinates\nSubmission pins an active calibration, a ground model linked to an active reference for that calibration, and an active depth scale for that ground model. Depth scales can be created and inspected under the selected ground model; active scales must match the installed depth weights and preprocessing. New calibrations preserve `k_original`, `k_undist`, and dimensions; `k_matrix` remains the undistorted K. Upload raw images for these calibrations. Legacy uploads without original intrinsics require already-undistorted images; RTSP requires recalibration. Ground-reference image points use undistorted coordinates.\n\n### RTSP sources and output selection\n`rtsp_frame` captures at worker execution. `latest_rtsp` requires a fresh persisted snapshot at submission and selects again at execution, without fallback capture. RTSP rejects caller files/timestamps; frame dimensions must exactly match calibration. `return_outputs` is a JSON-array form string: omitted registers all supported outputs, `[]` registers none. Internal files may still be generated; summary/instances/volumes are not filtered. Broker failure returns 503 and marks the job failed; predictions are not automatically redispatched.\n\n### Errors and deployment limits\nErrors use `detail` as a string, an object with a safe `code`, or a validation list. Handle all shapes. Browser video/ICE/reconnect, real-camera accuracy, model/GPU inference, TLS/TURN, and dashboard integration still require deployment testing. Legacy ground-reference/model routes do not yet enforce camera-bound API-key restrictions; do not treat them as tenant-isolated.",
     "version": "1.0.0"
   },
   "paths": {
@@ -2668,7 +2668,7 @@
             "description": "Parent resource or test image missing"
           },
           "409": {
-            "description": "Active calibration/reference/ground model changed"
+            "description": "Active prerequisites or depth model identity changed"
           },
           "503": {
             "description": "Model, storage, or inference unavailable/busy/timed out"
@@ -2800,6 +2800,12 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Scale identity missing, model changed, or saved fit invalid; create a new fit"
+          },
+          "503": {
+            "description": "Depth model unavailable"
           },
           "422": {
             "description": "Validation Error",
@@ -3575,7 +3581,6 @@
             "title": "Bev Overlay Url"
           },
           "bev_info": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Bev Info"
           }
@@ -3633,7 +3638,7 @@
           "files": {
             "items": {
               "type": "string",
-              "contentMediaType": "application/octet-stream"
+              "format": "binary"
             },
             "type": "array",
             "title": "Files"
@@ -3768,7 +3773,7 @@
             "anyOf": [
               {
                 "type": "string",
-                "contentMediaType": "application/octet-stream"
+                "format": "binary"
               },
               {
                 "type": "null"
@@ -3788,7 +3793,7 @@
         "properties": {
           "file": {
             "type": "string",
-            "contentMediaType": "application/octet-stream",
+            "format": "binary",
             "title": "File",
             "description": "Raw JPEG/PNG/BMP at calibration dimensions; legacy calibration requires an already-undistorted image"
           }
@@ -4182,7 +4187,6 @@
             "title": "Roi Polygon"
           },
           "metadata": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Metadata"
           }
@@ -4308,7 +4312,6 @@
             "title": "Roi Polygon"
           },
           "metadata": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Metadata"
           },
@@ -4461,7 +4464,6 @@
           "metadata": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -4551,7 +4553,6 @@
             "title": "Roi Polygon"
           },
           "metadata": {
-            "additionalProperties": true,
             "type": "object",
             "title": "Metadata"
           },
@@ -5125,8 +5126,87 @@
         ],
         "title": "DepthMeasurement"
       },
+      "DepthModelIdentity": {
+        "properties": {
+          "sha256": {
+            "type": "string",
+            "title": "Sha256"
+          },
+          "ultralytics_version": {
+            "type": "string",
+            "title": "Ultralytics Version"
+          },
+          "torch_version": {
+            "type": "string",
+            "title": "Torch Version"
+          },
+          "opencv_version": {
+            "type": "string",
+            "title": "Opencv Version"
+          },
+          "preprocessing_version": {
+            "type": "string",
+            "title": "Preprocessing Version"
+          },
+          "depth_convention": {
+            "type": "string",
+            "enum": [
+              "camera_axis_z"
+            ],
+            "const": "camera_axis_z",
+            "title": "Depth Convention"
+          },
+          "imgsz": {
+            "type": "integer",
+            "title": "Imgsz"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sha256",
+          "ultralytics_version",
+          "torch_version",
+          "opencv_version",
+          "preprocessing_version",
+          "depth_convention",
+          "imgsz"
+        ],
+        "title": "DepthModelIdentity"
+      },
       "DepthScaleCreate": {
         "properties": {
+          "test_image": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1024,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Test Image",
+            "description": "Source key returned by test-image upload or registered in this calibration; omitted uses its first image"
+          },
+          "depth_model": {
+            "type": "string",
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*\\.pt$",
+            "title": "Depth Model"
+          },
+          "clip_min_m": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Clip Min M",
+            "default": 0.1
+          },
+          "clip_max_m": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Clip Max M",
+            "default": 50.0
+          },
           "known_distances": {
             "items": {
               "$ref": "#/components/schemas/DepthMeasurement"
@@ -5173,12 +5253,18 @@
           },
           "coordinate_system": {
             "type": "string",
+            "enum": [
+              "undistorted_pixels"
+            ],
             "const": "undistorted_pixels",
             "title": "Coordinate System",
             "default": "undistorted_pixels"
           },
           "distance_type": {
             "type": "string",
+            "enum": [
+              "camera_axis_z_m"
+            ],
             "const": "camera_axis_z_m",
             "title": "Distance Type",
             "default": "camera_axis_z_m"
@@ -5235,6 +5321,17 @@
           "depth_model": {
             "type": "string",
             "title": "Depth Model"
+          },
+          "model_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DepthModelIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Exact weights and inference preparation used for the fit; null legacy identity requires a new fit"
           },
           "scale_s": {
             "type": "number",
@@ -5864,7 +5961,6 @@
           "result": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -6023,7 +6119,6 @@
           "meta": {
             "anyOf": [
               {
-                "additionalProperties": true,
                 "type": "object"
               },
               {
@@ -6280,13 +6375,6 @@
           "type": {
             "type": "string",
             "title": "Error Type"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "ctx": {
-            "type": "object",
-            "title": "Context"
           }
         },
         "type": "object",

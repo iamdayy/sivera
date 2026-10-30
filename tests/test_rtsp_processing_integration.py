@@ -22,6 +22,7 @@ from api.core.config import settings
 from api.core.storage import LocalStorage
 from api.models.orm import Calibration, CalibrationCaptureImage, CalibrationCaptureSession, CameraSnapshot, DepthScale, GroundModel, GroundReference, PredictionJob, PredictionOutput
 from api.services.calibration_capture_service import utcnow
+from api.services.depth_model_service import depth_model_identity
 from tests.calibration_fixtures import chessboard, projected_corners
 from tests.test_calibration_capture_service import session_fixture, jpeg
 
@@ -54,6 +55,16 @@ async def database():
 
 async def camera(db, camera_id, source=None):
     await db.execute(text("INSERT INTO cameras (id,name,rtsp_url,stream_enabled,resolution_w,resolution_h,fps,metadata) VALUES (:id,'processing-fixture',:source,true,640,480,25,'{}')"), {"id": camera_id, "source": source})
+
+
+def synthetic_scale(camera_id, ground_id, weights, active=True):
+    return DepthScale(id=uuid4(), camera_id=camera_id, ground_model_id=ground_id,
+        depth_model=weights.name, model_identity=depth_model_identity(weights),
+        fit_provenance={"fixture": "synthetic; inference mocked, not a measured calibration",
+                        "known_distances": [{"x": x, "y": 20, "distance_m": z}
+                                            for x, z in ((10, 1.), (20, 2.), (30, 3.))]},
+        scale_s=1, offset_b=0, residuals=[0, 0, 0], mean_residual_m=0, max_residual_m=0,
+        clip_min_m=.1, clip_max_m=50, is_active=active)
 
 
 def test_quality_snapshot_migration_legacy_defaults(monkeypatch):
@@ -179,7 +190,8 @@ def test_real_rtsp_snapshot_and_prediction_pipeline(monkeypatch, tmp_path):
             models = tmp_path / "models"
             models.mkdir()
             (models / settings.DEFAULT_SEG_MODEL).touch()
-            (models / settings.DEFAULT_DEPTH_MODEL).touch()
+            weights = models / settings.DEFAULT_DEPTH_MODEL
+            weights.write_bytes(b"synthetic weights; inference mocked")
             monkeypatch.setattr(settings, "MODELS_DIR", str(models))
             polygon = np.array([[250,200],[280,200],[280,230],[250,230]], np.float32)
             monkeypatch.setattr(segment_service, "predict_instances", lambda *a, **kw: ([{"cls":"Sampah_Berserakan","conf":0.9,"poly":polygon}], {0:"Sampah_Berserakan",1:"Sampah_Overload"}))
@@ -192,8 +204,7 @@ def test_real_rtsp_snapshot_and_prediction_pipeline(monkeypatch, tmp_path):
                 ground = GroundModel(id=uuid4(), camera_id=camera_id, calibration_id=calibration.id, ground_ref_id=reference.id,
                     R_matrix=np.eye(3).tolist(), t_vector=[0,0,0], H_i2w=[[.01,0,0],[0,.01,0],[0,0,1]],
                     H_w2i=[[100,0,0],[0,100,0],[0,0,1]], bev_ppm=20, bev_margin_m=.1)
-                scale = DepthScale(id=uuid4(), camera_id=camera_id, ground_model_id=ground.id,
-                    depth_model=settings.DEFAULT_DEPTH_MODEL, scale_s=1, offset_b=0, is_active=True)
+                scale = synthetic_scale(camera_id, ground.id, weights)
                 async with context() as db:
                     await camera(db, camera_id, source)
                     db.add(calibration)
@@ -258,9 +269,12 @@ def test_real_rtsp_snapshot_and_prediction_pipeline(monkeypatch, tmp_path):
     asyncio.run(check())
 
 
-def test_real_prediction_prerequisite_selection():
+def test_real_prediction_prerequisite_selection(monkeypatch, tmp_path):
     from api.services.prediction_orchestrator import submit_prediction_job
 
+    weights = tmp_path / "fixture-depth.pt"
+    weights.write_bytes(b"synthetic weights; prerequisite selection only")
+    monkeypatch.setattr(settings, "MODELS_DIR", str(tmp_path))
     camera_id = uuid4()
     K = [[800, 0, 320], [0, 810, 240], [0, 0, 1]]
 
@@ -281,10 +295,8 @@ def test_real_prediction_prerequisite_selection():
             proper_ref, old_ref = reference(current.id, 1, False), reference(old.id, 2, True)
             proper_ground, old_ground = ground(current.id, proper_ref.id), ground(old.id, old_ref.id)
             mismatched_ground = ground(current.id, old_ref.id)
-            proper_scale = DepthScale(id=uuid4(), camera_id=camera_id, ground_model_id=proper_ground.id,
-                                      depth_model="fixture", scale_s=1, offset_b=0, is_active=False)
-            wrong_scale = DepthScale(id=uuid4(), camera_id=camera_id, ground_model_id=old_ground.id,
-                                     depth_model="fixture", scale_s=1, offset_b=0, is_active=True)
+            proper_scale = synthetic_scale(camera_id, proper_ground.id, weights, active=False)
+            wrong_scale = synthetic_scale(camera_id, old_ground.id, weights)
             try:
                 async with context() as db:
                     await camera(db, camera_id)

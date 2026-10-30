@@ -14,6 +14,8 @@ from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import Camera, Calibration, GroundModel, DepthScale
 from api.services.image_service import encode_image
+from api.services.depth_model_service import depth_model_identity, validate_scale_model
+from api.services.depth_scale_service import validate_saved_scale
 
 # Lazy model cache: loads each YOLO depth model once per process
 _depth_model_cache: dict = {}
@@ -41,11 +43,20 @@ def predict_depth(
     from ultralytics import YOLO
     
     # Lazy-load and cache the model per process
-    if model_path not in _depth_model_cache:
-        _depth_model_cache[model_path] = YOLO(model_path)
-    model = _depth_model_cache[model_path]
+    identity = depth_model_identity(Path(model_path), imgsz)
+    cached = _depth_model_cache.get(model_path)
+    if cached is None or cached[0] != identity:
+        model = YOLO(model_path)
+        if model.task != "depth":
+            raise ValueError("prediction_invalid_depth")
+        _depth_model_cache[model_path] = (identity, model)
+    else:
+        model = cached[1]
     
     results = model.predict(source=image_bgr, imgsz=imgsz, device=device, verbose=False)
+    if depth_model_identity(Path(model_path), imgsz) != identity:
+        _depth_model_cache.pop(model_path, None)
+        raise ValueError("depth_scale_model_mismatch")
     res = results[0]
     
     if getattr(res, "depth", None) is None:
@@ -116,7 +127,13 @@ def apply_scale(
     clip_max: float = 50.0,
 ) -> np.ndarray:
     """Apply linear scale and clip to reasonable range."""
+    if (not np.isfinite(depth_raw).all() or (depth_raw <= 0).any()
+            or not np.isfinite([s, b, clip_min, clip_max]).all()
+            or s <= 0 or not 0 < clip_min < clip_max):
+        raise ValueError("prediction_invalid_depth")
     depth_m = s * depth_raw.astype(np.float32) + b
+    if not np.isfinite(depth_m).all() or (depth_m <= 0).any():
+        raise ValueError("prediction_invalid_depth")
     return np.clip(depth_m, clip_min, clip_max)
 
 
@@ -251,13 +268,15 @@ async def run_depth_pipeline(
     storage = get_storage()
     
     # 1. Predict depth
-    depth_model_path = resolve_depth_model(depth_scale.depth_model)
+    depth_model_path = validate_scale_model(depth_scale)
+    validate_saved_scale(depth_scale)
     
     depth_raw = predict_depth(
         image, str(depth_model_path),
         imgsz=settings.DEFAULT_DEPTH_IMGSZ,
         device="cpu"
     )
+    validate_scale_model(depth_scale)
     if depth_raw.shape != image.shape[:2] or not np.isfinite(depth_raw).all():
         raise ValueError("prediction_invalid_depth")
     

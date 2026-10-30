@@ -1,6 +1,7 @@
 """Security utilities: API key authentication."""
 from typing import Optional
 from uuid import UUID
+from datetime import datetime, timezone
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -42,7 +43,7 @@ async def verify_api_key(
     )
     db_key = result.scalar_one_or_none()
     
-    if not db_key:
+    if not db_key or (db_key.expires_at is not None and db_key.expires_at <= datetime.now(timezone.utc)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",

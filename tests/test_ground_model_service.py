@@ -113,7 +113,7 @@ def test_bev_preview_encodes_images_with_persisted_matrices(monkeypatch, tmp_pat
     monkeypatch.setattr(service, "get_storage", lambda: storage)
     camera = Camera(id=uuid4(), resolution_w=100, resolution_h=100)
     calibration = Calibration(k_matrix=np.eye(3).tolist(), k_original=None, resolution_w=None, resolution_h=None)
-    ground = GroundModel(H_i2w=[[.01, 0, 0], [0, .01, 0], [0, 0, 1]],
+    ground = GroundModel(id=uuid4(), H_i2w=[[.01, 0, 0], [0, .01, 0], [0, 0, 1]],
                          H_w2i=[[100, 0, 0], [0, 100, 0], [0, 0, 1]],
                          R_matrix=np.eye(3).tolist(), t_vector=[0, 0, 0],
                          bev_ppm=20, bev_margin_m=.1)
@@ -123,7 +123,11 @@ def test_bev_preview_encodes_images_with_persisted_matrices(monkeypatch, tmp_pat
     import io
     success, buf = cv2.imencode(".jpg", test_image)
     storage.save(test_key, io.BytesIO(buf.tobytes()), "image/jpeg")
-    preview = asyncio.run(service.generate_bev_preview(None, camera, calibration, ground, test_key))
+    from unittest.mock import MagicMock
+    db = MagicMock()
+    preview = asyncio.run(service.generate_bev_preview(db, camera, calibration, ground, test_key))
+    assert db.add.call_count == 3
+    assert all(call.args[0].ground_model_id == ground.id for call in db.add.call_args_list)
     assert preview["bev_info"]["ppm"] == 20
     for field in ("bev_image_url", "bev_mask_url", "bev_overlay_url"):
         key = preview[field].split("/files/", 1)[-1]

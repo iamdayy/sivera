@@ -13,6 +13,25 @@ from api.main import app
 
 
 class TestSecurity:
+    @pytest.mark.parametrize("delta,accepted", [(None, True), (-1, False), (0, False), (60, True)])
+    def test_database_key_expiry_is_utc(self, monkeypatch, delta, accepted):
+        from datetime import datetime, timezone, timedelta
+        from types import SimpleNamespace
+        from api.core import security
+        now = datetime(2026, 10, 26, tzinfo=timezone.utc)
+        monkeypatch.setattr(security, "datetime", SimpleNamespace(now=lambda tz: now))
+        monkeypatch.setattr(security.settings, "VALID_API_KEYS", "")
+        expiry = None if delta is None else (now + timedelta(seconds=delta)).astimezone(timezone(timedelta(hours=7)))
+        key = SimpleNamespace(expires_at=expiry)
+        db = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: key)))
+        if accepted:
+            assert asyncio.run(verify_api_key("expiry-test", db)) is key
+        else:
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(verify_api_key("expiry-test", db))
+            assert exc.value.status_code == 401
+            assert exc.value.detail == "Invalid API key"
+
     def test_hash_key_is_deterministic(self):
         h1 = hash_key("test-key-123")
         h2 = hash_key("test-key-123")

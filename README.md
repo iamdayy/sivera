@@ -20,7 +20,7 @@ SIVERA dirancang untuk mengatasi tantangan estimasi volume objek dan pemodelan r
 - **Kalibrasi Kamera** otomatis menggunakan papan catur (chessboard)
 - **Ground Plane Modeling** dengan referensi titik tanah
 - **Segmentasi Instance** untuk deteksi objek individual
-- **Volume Estimation** berbasis voxel grid dan convex hull
+- **Volume Estimation** berbasis median tinggi per cell grid dan area hull footprint × median tinggi
 
 ---
 
@@ -79,7 +79,7 @@ Path fitur di atas berada di bawah `/api/v1`; ID kamera/job adalah UUID. Lihat `
 | `depth_service` | Monocular depth estimation | YOLO26 depth |
 | `calibration_service` | Kamera intrinsik calibration | OpenCV chessboard |
 | `ground_model_service` | IPM & ground plane | Homography + PnP |
-| `volume_service` | Volume estimation | Voxel grid + Convex hull |
+| `volume_service` | Volume estimation | Median cell grid + hull footprint × median tinggi |
 | `prediction_orchestrator` | Pipeline end-to-end | Chained services |
 
 ---
@@ -210,7 +210,7 @@ Stream baru default disabled. Source URL disimpan backend; path UUID dikelola on
 
 **Perubahan kontrak kamera:** `rtsp_url` pada respons selalu `null` (deprecated), gunakan `rtsp_configured`. Field write `rtsp_url` tetap menerima URL lengkap; dashboard harus mempertahankan nilai yang tidak diedit, bukan mengirim `null` saat menyimpan field lain. `stream_enabled` adalah field respons; enable dilakukan lewat `/stream`. Pembatasan key kamera juga diterapkan pada CRUD kamera. Koordinasikan adaptasi ini di `sivera-dashboard`.
 
-Allowlist host kosong menolak semua source. Batasi egress MediaMTX ke jaringan/port kamera yang diizinkan; allowlist hostname bukan perlindungan lengkap terhadap DNS rebinding. Jangan menyimpan source credentials di metadata atau log. SQL parameter logging disembunyikan. Backend memproksikan hanya field signaling yang diperlukan, tidak meneruskan error mentah upstream.
+Semua hostname/IP RTSP/RTSPS diterima sesuai keputusan pengguna; `MEDIAMTX_ALLOWED_RTSP_HOSTS` tidak digunakan. Validasi skema, host, port, fragment, autentikasi, scope, dan camera binding tetap berlaku. Jangan menyimpan source credentials di metadata atau log. SQL parameter logging disembunyikan. Backend memproksikan hanya field signaling yang diperlukan, tidak meneruskan error mentah upstream.
 
 Playback tidak melakukan transcoding. Capture berkala, snapshot, dan prediksi RTSP tersedia melalui relay asli pada bagian berikut. Kamera harus menyediakan codec browser-compatible (misalnya H264 yang sesuai). Uji video, ICE, reconnect, dan cleanup di browser nyata pada jaringan deployment sebelum rilis dashboard; respons SDP saja tidak membuktikan video dapat diputar.
 
@@ -222,7 +222,7 @@ Tes unit/route: `python -m pytest tests -q`. Tes integrasi opt-in ada di `tests/
 
 Capture membaca relay asli `sivera_<camera_uuid>` melalui RTSP TCP, bukan WebRTC atau path transcoding. FFmpeg menghasilkan JPEG tanpa resize, crop, undistort, atau autorotation. Dimensi frame pertama menjadi resolusi sesi; perubahan resolusi atau URL sumber menghentikan sesi dengan error. `captured_at` adalah waktu UTC frame diterima worker, **bukan** timestamp sensor kamera.
 
-API, `worker`, `capture-worker`, dan `calibration-worker` memakai volume bernama `artifacts` pada `/app/storage`. Prediction worker membaca queue `prediction` serta `celery` untuk menghabiskan job lama; capture dan calibration worker masing-masing hanya membaca `capture` dan `calibration`, concurrency 1. Image backend memerlukan FFmpeg dan coreutils `timeout`. Jalankan migrasi sampai `005_capture_quality_snapshots` sebelum API/worker baru. Storage yang tidak writable menggagalkan startup, tidak beralih ke root lain. Semua proses wajib memakai `SECRET_KEY` yang sama dan stabil untuk identitas sumber/ownership; rotasi akan menginvalidasi identitas lama.
+API, `worker`, `capture-worker`, dan `calibration-worker` memakai volume bernama `artifacts` pada `/app/storage`. Prediction worker membaca queue `prediction` serta `celery` untuk menghabiskan job lama; capture dan calibration worker masing-masing hanya membaca `capture` dan `calibration`, concurrency 1. Image backend memerlukan FFmpeg dan coreutils `timeout`. Jalankan migrasi sampai `007_preview_artifacts` sebelum API/worker baru. Storage yang tidak writable menggagalkan startup, tidak beralih ke root lain. Semua proses wajib memakai `SECRET_KEY` yang sama dan stabil untuk identitas sumber/ownership; rotasi akan menginvalidasi identitas lama.
 
 **Sebelum deployment:** artifact lama di writable layer container `/app/storage` tidak otomatis masuk volume baru. Backup/salin data lama ke volume bersama dan verifikasi pemilik UID 1000 sebelum recreate container. Jangan menghapus container lama atau menjalankan `docker compose down -v` sebelum backup. Untuk host API/worker terpisah gunakan storage S3/private atau filesystem yang benar-benar dibagi; volume lokal Docker tidak dibagi antar-host.
 
@@ -256,6 +256,8 @@ Sesi lama dari fase 2 (`selection_version=0`) mempertahankan target **frame ters
 `auto_calibrate` default `false`. Set `true` untuk antrekan compute saat capture completed/stopped/expired; gambar kurang menghasilkan kegagalan compute, bukan kalibrasi kosong. Capture failed tidak otomatis dihitung. Untuk manual, tunggu capture terminal lalu POST `/compute` (minimum `MIN_CALIB_IMAGES`, default 10 frame diterima). Request saat queued/running/done bersifat idempoten; compute failed bisa diulang eksplisit. Poll `compute_status`: `none -> queued -> running -> done/failed`, beserta `compute_error_code`, timestamps, dan `result_calibration_id`.
 
 Hasil compute **nonaktif**. Periksa RMS/per-view errors (pixel), coverage (%), dan preview sebelum `POST /api/v1/cameras/{camera_id}/calibrations/{result_calibration_id}/activate`. Compute gagal tidak mengganti kalibrasi aktif. Upload kalibrasi multipart yang lama tetap sinkron dan auto-activate saat sukses. Kalibrasi baru menyimpan `k_original`, `k_undist`, resolusi, `alpha`, dan `per_view_errors`; makna `k_matrix` tetap K untuk gambar **undistorted**, bukan K asli. K asli kalibrasi lama tidak direkonstruksi saat migrasi; buat kalibrasi baru untuk prediksi RTSP/undistort preview.
+
+Jika preview kalibrasi mengembalikan 404 meskipun file ada di Docker, file mungkin belum terdaftar di `preview_artifacts`. Buka kembali preview melalui `GET /api/v1/cameras/{camera_id}/calibrations/{calibration_id}/undistort-preview`: endpoint membuat ulang preview yang belum terdaftar dari gambar kalibrasi, lalu menyimpan registrasinya sebelum mengembalikan URL. Gambar sumber dan intrinsics asli harus tersedia. Unduh URL hasil dengan header `X-API-Key`; keberadaan file saja tidak memberikan akses melalui `/files`.
 
 Progress: `attempted`, `captured`, `accepted`, `rejected`, `rejection_counts`, `failed_attempts`, resolusi aktual, `last_capture_at`, `heartbeat_at`, `deadline_at`, `error_code`, dan `finish_reason`. Percobaan yang dibatalkan/crash dapat membuat `attempted > captured + failed_attempts`. Status `queued -> running -> completed`; stop berjalan melalui `stopping -> stopped`. Batas waktu/300 frame menghasilkan `expired`, retry habis atau worker hilang menghasilkan `failed`. `completed` berarti target capture tercapai, bukan kalibrasi selesai. Semua API key tetap dibatasi scope dan kamera, termasuk akses `/files` ke artifact capture; gunakan fetch berheader API key untuk preview, bukan URL dengan key di query.
 
@@ -341,7 +343,7 @@ Endpoint kamera/artifact memerlukan header (root, health, dan dokumentasi tetap 
 X-API-Key: <API_KEY>
 ```
 
-Header hilang saat ini mendapat 422, key tidak valid/tidak aktif 401, dan scope atau akses kamera ditolak 403. Error `detail` dapat berupa string, objek `{code: ...}`, atau daftar validasi. `/health` selalu mengembalikan 200 jika probe selesai; baca `status` dan `database` untuk membedakan healthy dari degraded. Endpoint ini tidak memeriksa Redis, worker, MediaMTX, atau validitas key.
+Header hilang saat ini mendapat 422, key tidak valid/tidak aktif/kedaluwarsa 401, dan scope atau akses kamera ditolak 403. Key database ditolak saat `expires_at <= now` dalam UTC; key konfigurasi tidak memiliki expiry database. Error `detail` dapat berupa string, objek `{code: ...}`, atau daftar validasi. `/health` selalu mengembalikan 200 jika probe selesai; baca `status` dan `database` untuk membedakan healthy dari degraded. Endpoint ini tidak memeriksa Redis, worker, MediaMTX, atau validitas key.
 
 ### Kontrak OpenAPI
 
@@ -351,7 +353,7 @@ Kamera dipasang eksplisit di `/api/v1/cameras`; `/files` dan `/health` berada di
 python api/scripts/export_openapi.py openapi.json
 ```
 
-Exporter memakai proses dengan environment kosong dan direktori sementara tanpa `.env`, tanpa koneksi layanan atau startup aplikasi. Snapshot memakai default, bukan konfigurasi deployment; `/openapi.json` live tetap menjadi acuan jika default berubah. Snapshot yang sama disediakan di `../sivera-dashboard/openapi.json`, dengan plan integrasi di `.agents/plan/mediamtx-integration.md` pada repository dashboard.
+Exporter memakai proses dengan environment kosong dan direktori sementara tanpa `.env`, tanpa koneksi layanan atau startup aplikasi. Snapshot memakai default; `/openapi.json` live tetap menjadi acuan jika default deployment berubah. Adapter/types dashboard berada di `../sivera-dashboard`, dengan rencana terbaru `.agents/plan/2026-10-26-depth-contract-alignment.md` pada repository tersebut.
 
 Download gambar/output memerlukan `X-API-Key`: frontend harus mengambil blob melalui HTTP berautentikasi, bukan `<img src>` atau link biasa. Jangan menambahkan key ke query string. Simpan `Location` backend dan `ETag` WHEP untuk PATCH/DELETE memakai key pemilik yang sama.
 
@@ -361,7 +363,13 @@ API depth-scale tersedia di `/api/v1/cameras/{camera_id}/ground-models/{ground_m
 
 Creation memerlukan 3..100 titik pixel integer yang berbeda dan `distance_m` berupa **Z pada sumbu kamera dalam meter**, bukan jarak Euclidean dari rangefinder. Backend memakai adapter YOLO depth yang sama dengan prediction, menolak input/fit yang tidak layak, lalu auto-activate hasil yang lolos (201). Inferensi sinkron dibatasi timeout 120 detik secara default; busy/timeout mendapat 503. Residual fit bukan bukti akurasi fisik. Setup kamera/kalibrasi/referensi tanah tanpa scale yang cocok belum menjamin prediksi dapat berjalan. `estimated_duration_sec=30` hanya angka advisory tetap untuk prediction, bukan progress atau SLA.
 
-Router ground-reference/model/depth-scale kini membatasi key terikat kamera. Gap legacy tersisa: autentikasi key database belum memeriksa `expires_at`, dan cabang fallback `/files` belum menerapkan semua scope/registrasi artifact. Jangan mengklaim isolasi tenant penuh atau enforcement expiry; perbaikan terfokus dan regresinya diperlukan sebelum deployment multi-tenant.
+`test_image` opsional memakai gambar kalibrasi pertama jika dihilangkan. Jika diisi dari respons upload, backend memakai gambar upload tersebut. Nama model dan clipping juga opsional. Scale menyimpan SHA256 weights, versi dependency/preprocessing, konvensi depth, dan ukuran inferensi. Active GET/aktivasi/submission menolak identity hilang atau model berubah; buat fit baru menggunakan pengukuran nyata. Detail/list scale lama tetap dapat dibaca.
+
+Head migrasi saat ini `007_preview_artifacts`. Revision 006 menambah identity/provenance nullable tanpa mengarang identity scale lama. Revision 007 mendaftarkan preview ke satu parent calibration/ground model; preview lama tanpa registrasi perlu dibuat ulang. Terapkan migrasi melalui proses deployment setelah menguji database disposable; startup `create_all` tidak meng-upgrade tabel lama.
+
+Router ground-reference/model/depth-scale membatasi key terikat kamera. `/files` memerlukan registrasi resource dan scope domain; namespace tidak dikenal/orphan ditolak. Metadata preview terhapus mengikuti parent, sedangkan file fisik tetap ada. Produk masih satu organisasi; perubahan ini tidak menyediakan isolasi multi-tenant.
+
+Grid menghitung median tinggi × luas cell penuh, termasuk cell boundary parsial; cell dengan titik kurang dari minimum dibiarkan kosong. Pengelompokan cell telah diuji setara dengan algoritme sebelumnya. Metadata mask mencatat overlap dan pixel yang ditambah/dihapus morphology; volume agregat memakai union mask. Definisi kelas sampah, efek morphology pada gambar nyata, dan akurasi depth/volume tetap memerlukan validasi fisik held-out.
 
 ### Contoh Penggunaan
 

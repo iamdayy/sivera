@@ -1,20 +1,34 @@
 """Ground reference and ground model service: wraps ipm.py logic."""
-import json
-import tempfile
-from pathlib import Path
 from typing import List, Optional, Tuple
-from uuid import uuid4
+from uuid import UUID
 
 import cv2
 import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import update
 
 from api.core.config import settings
 from api.core.storage import get_storage, generate_storage_key
-from api.models.orm import Camera, Calibration, GroundReference, GroundModel
+from api.models.orm import Camera, Calibration, GroundReference, GroundModel, PreviewArtifact, GroundReferenceSource
 from api.services.image_service import encode_image
 from api.services.depth_scale_service import compute_depth_scale, read_image, prepare_image
+from api.services.ground_reference_source_service import read_source_image
+
+
+def validate_ground_points(image_points: np.ndarray, world_points: np.ndarray,
+                           size: tuple[int, int] | None = None) -> None:
+    if (image_points.ndim != 2 or world_points.ndim != 2 or image_points.shape != world_points.shape
+            or image_points.shape[1] != 2 or not 4 <= len(image_points) <= 100
+            or not np.isfinite(image_points).all() or not np.isfinite(world_points).all()):
+        raise ValueError("ground_reference_invalid_points")
+    if size and ((image_points < 0).any() or (image_points >= np.asarray(size)).any()):
+        raise ValueError("ground_reference_pixel_out_of_bounds")
+    for points in (image_points, world_points):
+        if len(np.unique(points, axis=0)) != len(points):
+            raise ValueError("ground_reference_duplicate_points")
+        singular = np.linalg.svd(points - points.mean(axis=0), compute_uv=False)
+        if singular[1] <= singular[0] * 1e-6:
+            raise ValueError("ground_reference_degenerate_points")
 
 
 def compute_ground_model(
@@ -29,29 +43,29 @@ def compute_ground_model(
     image_points = np.asarray(image_points, np.float64)
     world_points = np.asarray(world_points, np.float64)
     
-    if len(image_points) < 4 or len(image_points) != len(world_points):
-        raise ValueError("Need at least 4 corresponding points")
-    
-    # Homography world -> image
-    H_w2i, _ = cv2.findHomography(world_points, image_points, 0)
-    H_i2w = np.linalg.inv(H_w2i)
-    
-    # Camera pose via solvePnP (ground plane Z=0)
+    validate_ground_points(image_points, world_points)
+    K = np.asarray(K, np.float64)
+    if (K.shape != (3, 3) or not np.isfinite(K).all() or min(K[0, 0], K[1, 1]) <= 0
+            or not np.allclose(K[2], [0, 0, 1])):
+        raise ValueError("calibration_invalid_intrinsics")
+
     obj_points = np.hstack([world_points, np.zeros((len(world_points), 1))])
-    ok, rvec, tvec = cv2.solvePnP(
-        obj_points, image_points, np.asarray(K, np.float64), None,
-        flags=cv2.SOLVEPNP_IPPE
-    )
-    if not ok:
-        raise RuntimeError("solvePnP failed")
-    
-    rvec, tvec = cv2.solvePnPRefineLM(
-        obj_points, image_points, np.asarray(K, np.float64), None, rvec, tvec
-    )
-    R, _ = cv2.Rodrigues(rvec)
-    
-    # Reprojection error
-    proj, _ = cv2.projectPoints(obj_points, rvec, tvec, np.asarray(K, np.float64), None)
+    try:
+        H_w2i, _ = cv2.findHomography(world_points, image_points, 0)
+        if H_w2i is None or not np.isfinite(H_w2i).all() or np.linalg.matrix_rank(H_w2i) < 3:
+            raise ValueError("ground_reference_degenerate_points")
+        H_i2w = np.linalg.inv(H_w2i)
+        ok, rvec, tvec = cv2.solvePnP(obj_points, image_points, K, None, flags=cv2.SOLVEPNP_IPPE)
+        if not ok:
+            raise ValueError("ground_reference_invalid_geometry")
+        rvec, tvec = cv2.solvePnPRefineLM(obj_points, image_points, K, None, rvec, tvec)
+        R, _ = cv2.Rodrigues(rvec)
+        proj, _ = cv2.projectPoints(obj_points, rvec, tvec, K, None)
+    except (cv2.error, np.linalg.LinAlgError):
+        raise ValueError("ground_reference_invalid_geometry") from None
+    if (not all(np.isfinite(value).all() for value in (H_i2w, R, tvec, proj))
+            or ((obj_points @ R.T + tvec.ravel())[:, 2] <= 0).any()):
+        raise ValueError("ground_reference_invalid_geometry")
     err = np.linalg.norm(proj.reshape(-1, 2) - image_points, axis=1)
     
     # Camera position in world coordinates
@@ -82,6 +96,7 @@ def compute_bev(
     gm: dict,
     ppm: int = 200,
     margin_m: float = 1.0,
+    bounds_world: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """
     Compute BEV (Bird's Eye View) image and mask projection.
@@ -103,14 +118,18 @@ def compute_bev(
     else:
         xs, ys = world_pts[:, 0], world_pts[:, 1]
     
+    if bounds_world is not None:
+        xs, ys = np.asarray(bounds_world, np.float64).T
+    if not np.isfinite(xs).all() or not np.isfinite(ys).all():
+        raise ValueError("bev_extent_invalid")
     xmin, xmax = xs.min() - margin_m, xs.max() + margin_m
     ymin, ymax = ys.min() - margin_m, ys.max() + margin_m
     
     wpx = int(round((xmax - xmin) * ppm))
     hpx = int(round((ymax - ymin) * ppm))
     
-    if max(wpx, hpx) > 6000:
-        raise ValueError(f"BEV too large: {wpx}x{hpx}. Reduce ppm or margin.")
+    if min(wpx, hpx) <= 0 or max(wpx, hpx) > 6000:
+        raise ValueError("bev_extent_invalid")
     
     Hb = bev_matrix(H_i2w, xmin, ymin, ppm)
     bev_img = cv2.warpPerspective(image, Hb, (wpx, hpx))
@@ -198,13 +217,12 @@ def draw_bev_overlay(
             cv2.putText(overlay, f"{gy:g}m", (3, y - 3), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
     
-    # Reference points
-    world_pts = np.array([[0, 0], [2, 0], [2, 3], [0, 3]], np.float64)  # Default 2x3 rect
-    # Try to get actual world points from ground reference
-    for wp in world_pts:
+    for index, wp in enumerate(gm.get("world_points", []), 1):
         pt = to_bev(wp)
         if 0 <= pt[0] < wpx and 0 <= pt[1] < hpx:
             cv2.circle(overlay, tuple(pt), 6, (0, 0, 255), -1)
+            cv2.putText(overlay, str(index), (pt[0] + 9, pt[1] - 9),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
     
     # Base contour
     if base_w is not None and len(base_w):
@@ -221,6 +239,7 @@ async def save_ground_reference(
     version: int,
     world_units: str = "meter",
     description: Optional[str] = None,
+    source_id: Optional[UUID] = None,
 ) -> GroundReference:
     """Save ground reference to database."""
     # Deactivate previous
@@ -233,6 +252,7 @@ async def save_ground_reference(
     gr = GroundReference(
         camera_id=camera.id,
         calibration_id=calibration.id,
+        source_id=source_id,
         version=version,
         image_points=image_points,
         world_points=world_points,
@@ -284,24 +304,26 @@ async def generate_bev_preview(
     camera: Camera,
     calibration: Calibration,
     ground_model: GroundModel,
-    test_image_path: str,
+    test_image_path: Optional[str],
     mask_path: Optional[str] = None,
+    source: Optional[GroundReferenceSource] = None,
+    reference_points: Optional[List[List[float]]] = None,
 ) -> dict:
     """Generate BEV preview images and save to storage."""
     storage = get_storage()
     
-    img = prepare_image(read_image(test_image_path, storage), calibration, camera)
+    if source is not None:
+        # Reuse the exact PNG shown during annotation, without another undistortion.
+        img = read_source_image(source, storage)
+    else:
+        img = prepare_image(read_image(test_image_path, storage), calibration, camera)
     
-    # Load or create mask
     if mask_path:
         mask = cv2.cvtColor(read_image(mask_path, storage), cv2.COLOR_BGR2GRAY) > 127
         if mask.shape != img.shape[:2]:
             raise ValueError("bev_mask_resolution_mismatch")
     else:
-        # Create dummy mask for preview
         mask = np.zeros(img.shape[:2], bool)
-        h, w = mask.shape
-        mask[h//2:, w//4:3*w//4] = True
     
     gm_dict = {
         "H_i2w": np.array(ground_model.H_i2w, np.float64),
@@ -311,11 +333,13 @@ async def generate_bev_preview(
         "K": np.array(calibration.k_matrix, np.float64),
         "cam_height": ground_model.cam_height,
         "pitch_down_deg": ground_model.pitch_down_deg,
+        "world_points": reference_points or [],
     }
     
     bev_img, bev_mask, bev_overlay, bev_info = compute_bev(
         img, mask.astype(np.uint8), gm_dict, 
-        ppm=ground_model.bev_ppm, margin_m=ground_model.bev_margin_m
+        ppm=ground_model.bev_ppm, margin_m=ground_model.bev_margin_m,
+        bounds_world=np.asarray(reference_points) if reference_points else None,
     )
     
     # Save images
@@ -329,12 +353,18 @@ async def generate_bev_preview(
             extension="jpg"
         )
         storage.save(key, buf, "image/jpeg")
+        db.add(PreviewArtifact(storage_key=key, ground_model_id=ground_model.id))
         return f"/files/{key}"
     
+    bev_image_url = save_img(bev_img, "image")
+    bev_mask_url = save_img(bev_mask, "mask")
+    bev_overlay_url = save_img(bev_overlay, "overlay")
+    
     return {
-        "bev_image_url": save_img(bev_img, "image"),
-        "bev_mask_url": save_img(bev_mask, "mask"),
-        "bev_overlay_url": save_img(bev_overlay, "overlay"),
+        "bev_image_url": bev_image_url,
+        "bev_mask_url": bev_mask_url,
+        "bev_overlay_url": bev_overlay_url,
         "bev_info": bev_info,
+        "source_id": source.id if source else None,
+        "has_mask": mask_path is not None,
     }
-

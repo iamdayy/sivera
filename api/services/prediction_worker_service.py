@@ -28,6 +28,9 @@ SAFE_ERRORS = {
     "prediction_invalid_depth", "snapshot_stream_sync_pending",
     "prediction_volume_grid_too_large",
     "calibration_invalid_intrinsics",
+    "depth_scale_identity_missing", "depth_scale_model_mismatch", "depth_model_unavailable",
+    "depth_scale_invalid_saved_fit",
+    "prediction_invalid_points", "prediction_invalid_grid_parameters", "prediction_invalid_segmentation",
 }
 
 

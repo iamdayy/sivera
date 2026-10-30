@@ -29,7 +29,7 @@ async def reconcile_streams(service: MediaMTXService) -> None:
                     await service.ensure_path(name, row.rtsp_url, configs.get(name))
                 except MediaMTXError as exc:
                     logger.warning("Stream sync camera=%s code=%s", row.id, exc.code)
-                    # Invalidated allowlist entries must not remain readable.
+                    # Remove an existing path when its desired source URL is invalid.
                     if exc.status_code == 422 and name in configs:
                         await service.delete_path(name)
             for name in configs.keys() - desired.keys():

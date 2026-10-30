@@ -14,13 +14,22 @@ from api.models.orm import PredictionJob, DetectedInstance, VolumeEstimate
 from api.services.image_service import encode_image
 
 
+def validate_points(X: np.ndarray, Y: np.ndarray, height: np.ndarray) -> None:
+    if (any(values.ndim != 1 for values in (X, Y, height)) or not len(X) == len(Y) == len(height)
+            or any(not np.isfinite(values).all() for values in (X, Y, height)) or (height < 0).any()):
+        raise ValueError("prediction_invalid_points")
+
+
 def estimate_volume_grid(
     X: np.ndarray, Y: np.ndarray, height: np.ndarray,
     cell_m: float = 0.05, min_pts_per_cell: int = 2
-) -> Tuple[float, float, np.ndarray, dict]:
+) -> Tuple[float | None, float | None, np.ndarray, dict]:
     """Estimate volume using grid median method."""
+    validate_points(X, Y, height)
+    if not np.isfinite(cell_m) or cell_m <= 0 or not isinstance(min_pts_per_cell, int) or min_pts_per_cell < 1:
+        raise ValueError("prediction_invalid_grid_parameters")
     if len(height) == 0:
-        return 0.0, 0.0, np.zeros((1, 1)), {}
+        return None, None, np.full((1, 1), np.nan), {}
     
     x_min, x_max = X.min(), X.max()
     y_min, y_max = Y.min(), Y.max()
@@ -36,16 +45,17 @@ def estimate_volume_grid(
     grid_height = np.full((ny, nx), np.nan, dtype=np.float32)
     cell_area = cell_m ** 2
     
-    for j in range(ny):
-        for i in range(nx):
-            mask = (ix == i) & (iy == j)
-            pts = height[mask]
-            if len(pts) >= min_pts_per_cell:
-                grid_height[j, i] = float(np.median(pts))
+    cell_ids = iy * nx + ix
+    order = np.argsort(cell_ids, kind="stable")
+    cells, starts, counts = np.unique(cell_ids[order], return_index=True, return_counts=True)
+    sorted_heights = height[order]
+    for cell, start, count in zip(cells, starts, counts):
+        if count >= min_pts_per_cell:
+            grid_height.flat[cell] = float(np.median(sorted_heights[start:start + count]))
     
     valid = np.isfinite(grid_height) & (grid_height > 0)
-    volume_m3 = float(np.nansum(grid_height[valid]) * cell_area)
-    footprint_m2 = float(valid.sum() * cell_area)
+    volume_m3 = float(np.sum(grid_height[valid]) * cell_area) if valid.any() else None
+    footprint_m2 = float(valid.sum() * cell_area) if valid.any() else None
     
     grid_info = dict(
         x_min=x_min, y_min=y_min, cell_m=cell_m,
@@ -56,6 +66,7 @@ def estimate_volume_grid(
 
 def estimate_volume_convexhull(X: np.ndarray, Y: np.ndarray, height: np.ndarray) -> Tuple[float | None, float | None]:
     """Estimate footprint-hull area times median height, not a true 3D hull."""
+    validate_points(X, Y, height)
     if len(height) < 3:
         return None, None
     
@@ -67,6 +78,8 @@ def estimate_volume_convexhull(X: np.ndarray, Y: np.ndarray, height: np.ndarray)
         return None, None
     
     med_h = float(np.median(height))
+    if med_h <= 0:
+        return None, None
     volume_m3 = footprint_m2 * med_h
     return volume_m3, footprint_m2
 
@@ -147,7 +160,7 @@ def add_scale_bar(img: np.ndarray, cell_m: float, ppm_display: Optional[float] =
     x1, y1 = w - bar_px - 20, h - 30
     x2, y2 = x1 + bar_px, y1 + 10
     cv2.rectangle(img, (x1, y1), (x2, y2), (255, 255, 255), -1)
-    cv2.putText(img, f"{bar_m:g} m", (x1, y1 - 5),
+    cv2.putText(img, f"{bar_px * cell_m:g} m", (x1, y1 - 5),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
     return img
 

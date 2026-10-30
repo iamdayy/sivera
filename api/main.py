@@ -14,7 +14,7 @@ from api.core.config import settings, STORAGE_ROOT
 from api.core.database import AsyncSession, get_db, init_db, close_db, engine
 from api.core.security import verify_api_key
 from api.core.storage import get_storage
-from api.routes import cameras, calibrations, calibration_captures, ground_refs, predictions, streams, snapshots
+from api.routes import cameras, calibrations, calibration_captures, ground_refs, ground_reference_sources, predictions, streams, snapshots
 from api.schemas.system import HealthResponse, RootResponse
 from api.services.mediamtx_service import MediaMTXService
 from api.services.stream_service import reconciliation_loop
@@ -81,7 +81,8 @@ def custom_openapi() -> dict:
             "### Prediction prerequisites and coordinates\n"
             "Submission pins an active calibration, a ground model linked to an active reference "
             "for that calibration, and an active depth scale for that ground model. "
-            "There is no public depth-scale setup/readiness endpoint; provisioning is an operator task. "
+            "Depth scales can be created and inspected under the selected ground model; "
+            "active scales must match the installed depth weights and preprocessing. "
             "New calibrations preserve `k_original`, `k_undist`, and dimensions; `k_matrix` "
             "remains the undistorted K. Upload raw images for these calibrations. Legacy uploads "
             "without original intrinsics require already-undistorted images; RTSP requires recalibration. "
@@ -222,6 +223,7 @@ app.include_router(snapshots.router, prefix="/api/v1/cameras/{camera_id}/snapsho
 app.include_router(calibrations.router, prefix="/api/v1/cameras/{camera_id}/calibrations")
 app.include_router(calibration_captures.router, prefix="/api/v1/cameras/{camera_id}/calibration-captures")
 app.include_router(ground_refs.router, prefix="/api/v1/cameras/{camera_id}/ground-references")
+app.include_router(ground_reference_sources.router, prefix="/api/v1/cameras/{camera_id}/ground-reference-sources")
 app.include_router(ground_refs.model_router, prefix="/api/v1/cameras/{camera_id}/ground-models")
 app.include_router(ground_refs.depth_scale_router, prefix="/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales")
 app.include_router(predictions.router, prefix="/api/v1/cameras/{camera_id}/predict")

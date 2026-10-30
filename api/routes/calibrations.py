@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 from api.core.config import settings
 from api.core.database import get_db
 from api.core.security import check_camera_access, require_scope
-from api.models.orm import ApiKey, Camera, Calibration
+from api.models.orm import ApiKey, Camera, Calibration, PreviewArtifact
 from api.schemas.calibration import (
     CalibrationCreate, CalibrationResponse, CalibrationListResponse, 
     CalibrationActivateResponse, UndistortPreviewResponse
@@ -228,6 +228,7 @@ async def get_undistort_preview(
     result = await db.execute(
         select(Calibration)
         .where(Calibration.id == calibration_id, Calibration.camera_id == camera_id)
+        .with_for_update()  # Serialize cache generation/registration for this calibration.
     )
     calibration = result.scalar_one_or_none()
     
@@ -262,10 +263,13 @@ async def get_undistort_preview(
     K_target = np.array(calibration.k_undist or calibration.k_matrix, np.float64)
     dist = np.array(calibration.dist_coeffs, np.float64)
     
-    storage = get_storage()
     preview_key = f"cameras/{camera_id}/calibrations/{calibration_id}/preview.jpg"
+    registered = await db.scalar(select(PreviewArtifact.storage_key).where(
+        PreviewArtifact.storage_key == preview_key,
+        PreviewArtifact.calibration_id == calibration_id,
+    ))
     
-    if storage.exists(preview_key):
+    if registered is not None and storage.exists(preview_key):
         return UndistortPreviewResponse(
             preview_url=storage.get_url(preview_key),
             original_size=[img.shape[1], img.shape[0]],
@@ -273,16 +277,18 @@ async def get_undistort_preview(
             k_undist=calibration.k_matrix,
         )
     
-    # Generate preview if not cached
+    # Regenerate unregistered legacy files instead of granting access to orphan bytes.
     undist = cv2.undistort(img, K, dist, None, K_target)
     
-    import io
     success, buf_arr = cv2.imencode(".jpg", undist, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not success:
         raise HTTPException(status_code=500, detail="Failed to encode preview image")
     
     buf = io.BytesIO(buf_arr.tobytes())
     storage.save(preview_key, buf, "image/jpeg")
+    if registered is None:
+        db.add(PreviewArtifact(storage_key=preview_key, calibration_id=calibration_id))
+    await db.commit()
     
     return UndistortPreviewResponse(
         preview_url=storage.get_url(preview_key),
