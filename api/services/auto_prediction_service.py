@@ -82,6 +82,21 @@ class AutoPredictionRunner:
             camera.auto_predict_last_run_error = event["error_code"]
         return True
 
+    async def _publish(self, event: dict) -> None:
+        """Publish event ke SSE subscribers (fire-and-forget)."""
+        from api.runtime import event_hub
+        try:
+            await event_hub.publish(self.camera_id, event)
+        except Exception:
+            # Event hub tidak kritis untuk alur prediksi; abaikan gagal publish.
+            pass
+
+    async def _current_in_db(self, db) -> bool:
+        camera = await db.scalar(select(Camera).options(raiseload("*")).where(
+            Camera.id == self.camera_id,
+        ))
+        return self.current(camera)
+
     async def persist(self, context: dict, result: dict, event: dict) -> None:
         volume = grid_volume(result)
         event["volume_liters"], event["volume_method"] = volume, "grid" if volume is not None else None
@@ -148,29 +163,53 @@ class AutoPredictionRunner:
             "skip_reason": None, "error_code": None,
         }
         result, context = None, None
+        segmentation = None
         try:
             async with asyncio.timeout(self.config.PREDICTION_TIMEOUT_SEC):
+                # Stage 1: capture frame + segment original image (vision slot only).
                 async with vision_slot(self.config.PREDICTION_TIMEOUT_SEC, self.active):
+                    if not await self.active():
+                        return None
                     frame = await capture_live_frame(self.camera_id, self.config, self.identity, self.db_context)
                     check_freshness(frame.captured_at, self.options["max_frame_age_sec"])
-                    image = base64.b64encode(frame.content).decode("ascii")
-                    event.update(captured_at=frame.captured_at, frame_w=frame.width, frame_h=frame.height, frame_jpeg_base64=image)
-                    segmentation = await run_vision("segment", {"image": image, "options": self.options},
+                    image_b64 = base64.b64encode(frame.content).decode("ascii")
+                    event.update(captured_at=frame.captured_at, frame_w=frame.width, frame_h=frame.height,
+                                 frame_jpeg_base64=image_b64)
+                    segmentation = await run_vision("segment", {"image": image_b64, "options": self.options},
                                                     self.config.PREDICTION_TIMEOUT_SEC, self.active)
                     event["segmentation"] = {**segmentation, "coordinate_space": "raw"}
-                    if not segmentation["has_mask"]:
-                        event["skip_reason"] = "no_segmentation"
-                    else:
-                        async with self.db_context() as db:
-                            calibration, ground, scale = await active_prerequisites(db, self.camera_id, "rtsp_frame")
-                            context = measurement_context(camera, calibration, ground, scale)
+
+                # Jika tidak ada waste mask: segera kirim frame asli (tidak ada measurement).
+                if not segmentation or not segmentation.get("has_mask"):
+                    event["skip_reason"] = "no_segmentation"
+                    await self._publish(event)
+                else:
+                    # Segmenasi terdeteksi: segera kirim frame + mask overlay ke frontend.
+                    await self._publish(event)
+
+                    # Stage 2: resolve prerequisite (DB only, tanpa vision slot).
+                    async with self.db_context() as db:
+                        if not await self._current_in_db(db):
+                            return None
+                        calibration, ground, scale = await active_prerequisites(db, self.camera_id, "rtsp_frame")
+                        context = measurement_context(camera, calibration, ground, scale)
+
+                    # Stage 3: measure + volume (vision slot).
+                    async with vision_slot(self.config.PREDICTION_TIMEOUT_SEC, self.active):
+                        if not await self.active():
+                            return None
                         result = await run_vision("measure", {
-                            "image": image, "segmentation": segmentation, "context": context, "options": self.options,
+                            "image": event["frame_jpeg_base64"],
+                            "segmentation": segmentation, "context": context, "options": self.options,
                         }, self.config.PREDICTION_TIMEOUT_SEC, self.active)
-                if result is not None:
-                    await self.persist(context, result, event)
+
+                    if result is not None:
+                        await self.persist(context, result, event)
+                        # Publish update akhir (volume/saved) setelah measurement.
+                        await self._publish(event)
         except asyncio.CancelledError:
             event["error_code"] = "prediction_interrupted"
+            await self._publish(event)
             await self.finish(event)
             raise
         except Exception as exc:
