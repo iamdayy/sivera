@@ -2,6 +2,7 @@
 import asyncio
 import io
 import json
+import logging
 from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
@@ -36,6 +37,8 @@ from api.services.calibration_capture_service import utcnow
 
 
 router = APIRouter(tags=["predictions"])
+
+logger = logging.getLogger(__name__)
 
 
 @router.post("", response_model=PredictionJobSubmitResponse, status_code=status.HTTP_202_ACCEPTED, responses={
@@ -129,28 +132,40 @@ async def submit_prediction(
         )
     except ValueError as exc:
         await db.rollback()
+        logger.error(
+            "Prediction submission failed camera=%s code=%s exception=%s:%s",
+            camera_id, str(exc), type(exc).__name__, exc,
+        )
         raise HTTPException(status_code=409, detail={"code": str(exc)}) from None
     try:
         if source_path:
             await asyncio.to_thread(storage.save, source_path, io.BytesIO(content), file.content_type or "application/octet-stream")
         await db.commit()
-    except Exception:
+    except Exception as exc:
         await db.rollback()
         if source_path:
             try:
                 await asyncio.to_thread(storage.delete, source_path)
             except Exception:
                 pass
+        logger.error(
+            "Prediction submission storage error camera=%s exception=%s:%s",
+            camera_id, type(exc).__name__, exc,
+        )
         raise HTTPException(status_code=503, detail={"code": "prediction_submission_failed"}) from None
     
     try:
         await admit_job(db)
         await db.commit()
-    except HTTPException:
+    except HTTPException as exc:
         await db.execute(update(PredictionJob).where(PredictionJob.id == job.id, PredictionJob.status == "pending").values(
             status="failed", error_msg="prediction_queue_unavailable", completed_at=utcnow(),
         ))
         await db.commit()
+        logger.error(
+            "Prediction queue full camera=%s job=%s",
+            camera_id, job.id,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Prediction queue unavailable. Please try again later.",

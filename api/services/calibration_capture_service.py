@@ -326,11 +326,18 @@ class CaptureRunner:
                         "capture_ffmpeg_missing", "capture_runtime_missing", "stream_service_not_configured", "capture_frame_too_large",
                         "capture_resolution_too_large",
                     }
+                    logger.error(
+                        "Capture error session=%s code=%s terminal=%s exception=%s:%s",
+                        self.session_id, exc.code, terminal, type(exc).__name__, exc,
+                    )
                     await self.record_failure(exc.code, terminal)
                     if terminal:
                         return
                 if not await self.wait(session.interval_sec):
                     return
-        except Exception:
-            logger.error("Capture worker failed session=%s", self.session_id)
+        except Exception as exc:
+            logger.error(
+                "Capture worker error session=%s exception=%s:%s",
+                self.session_id, type(exc).__name__, exc,
+            )
             await self.fail("capture_worker_error")

@@ -84,9 +84,16 @@ class PredictionArtifacts:
                 continue
             key = generate_storage_key(str(self.camera_id), str(self.job_id), kind, artifact["extension"])
             self.keys.append(key)
-            await finish_io(asyncio.to_thread(
-                self.storage.save, key, io.BytesIO(base64.b64decode(artifact["data"], validate=True)), artifact["mime_type"],
-            ))
+            try:
+                await finish_io(asyncio.to_thread(
+                    self.storage.save, key, io.BytesIO(base64.b64decode(artifact["data"], validate=True)), artifact["mime_type"],
+                ))
+            except Exception as exc:
+                logger.error(
+                    "Prediction artifact write failed job=%s kind=%s key=%s exception=%s:%s",
+                    self.job_id, kind, key, type(exc).__name__, exc,
+                )
+                raise
             self.outputs.append({"output_type": kind, "file_path": key,
                                  **{name: artifact.get(name) for name in ("mime_type", "width", "height", "meta")}})
 
@@ -104,5 +111,8 @@ class PredictionArtifacts:
         for key in self.keys:
             try:
                 await finish_io(asyncio.to_thread(self.storage.delete, key))
-            except Exception:
-                logger.warning("Prediction artifact cleanup failed job=%s", self.job_id)
+            except Exception as exc:
+                logger.error(
+                    "Prediction artifact cleanup failed job=%s key=%s exception=%s:%s",
+                    self.job_id, key, type(exc).__name__, exc,
+                )

@@ -1,4 +1,5 @@
 """Camera API routes."""
+import logging
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status, UploadFile, File, Form
@@ -23,6 +24,8 @@ from api.core.storage import get_storage, generate_storage_key
 
 
 router = APIRouter(tags=["cameras"])
+
+logger = logging.getLogger(__name__)
 
 
 @router.post("", response_model=CameraResponse, status_code=status.HTTP_201_CREATED)
@@ -275,6 +278,10 @@ async def update_auto_predict_config(
         validated = AutoPredictConfig.model_validate(merged)
     except ValueError as exc:
         await db.rollback()
+        logger.error(
+            "Auto-predict config validation failed camera=%s exception=%s:%s",
+            camera_id, type(exc).__name__, exc,
+        )
         raise HTTPException(status_code=422, detail={"code": "prediction_invalid_parameters", "message": str(exc)}) from None
     
     new_config = validated.model_dump(exclude_unset=False)

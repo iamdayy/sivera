@@ -189,7 +189,10 @@ class CalibrationComputeRunner:
             code = exc.code if isinstance(exc, VisionError) and exc.code in codes else "calibration_compute_failed"
             if isinstance(exc, TimeoutError) or isinstance(exc, VisionError) and exc.code == "vision_timeout":
                 code = "calibration_compute_timeout"
-            logger.warning("Calibration computation failed session=%s code=%s", self.session_id, code)
+            logger.error(
+                "Calibration computation error session=%s code=%s exception=%s:%s",
+                self.session_id, code, type(exc).__name__, exc,
+            )
             async with self.db_context() as db:
                 current = await self.locked(db)
                 if current is not None:

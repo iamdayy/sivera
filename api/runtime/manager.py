@@ -94,7 +94,9 @@ async def admit_job(db: AsyncSession, config: Settings = settings) -> None:
     predictions = select(func.count()).select_from(PredictionJob).where(PredictionJob.status.in_(("pending", "processing"))).scalar_subquery()
     captures = select(func.count()).select_from(CalibrationCaptureSession).where(CalibrationCaptureSession.status.in_(("queued", "running", "stopping"))).scalar_subquery()
     computations = select(func.count()).select_from(CalibrationCaptureSession).where(CalibrationCaptureSession.compute_status.in_(("queued", "running"))).scalar_subquery()
-    if await db.scalar(select(predictions + captures + computations)) >= config.RUNTIME_MAX_PENDING_JOBS:
+    total = await db.scalar(select(predictions + captures + computations))
+    if total >= config.RUNTIME_MAX_PENDING_JOBS:
+        logger.error("Runtime queue full pending=%d max=%d", total, config.RUNTIME_MAX_PENDING_JOBS)
         raise HTTPException(status_code=503, detail={"code": "runtime_queue_full"}, headers={"Retry-After": "5"})
 
 
@@ -172,9 +174,14 @@ class LocalRuntime:
                                 PredictionJob.deadline_at.is_(None) & (stamp <= now - timedelta(seconds=timeout)))
                 if interrupted and status == "processing":
                     condition, code = True, "prediction_interrupted"
-                await db.execute(update(PredictionJob).where(PredictionJob.status == status, condition).values(
+                result = await db.execute(update(PredictionJob).where(PredictionJob.status == status, condition).values(
                     status="failed", error_msg=code, result=None, completed_at=now, run_token=None,
                 ))
+                if result.rowcount:
+                    logger.error(
+                        "Runtime reconcile failed jobs status=%s code=%s interrupted=%s count=%d",
+                        status, code, interrupted, result.rowcount,
+                    )
             cameras = (await db.scalars(select(Camera).options(raiseload("*")).where(
                 Camera.auto_predict_run_token.is_not(None),
                 True if interrupted else or_(Camera.auto_predict_deadline_at.is_(None), Camera.auto_predict_deadline_at <= now),
@@ -184,6 +191,10 @@ class LocalRuntime:
                 camera.auto_predict_last_run_status = "failed"
                 camera.auto_predict_last_run_error = "prediction_interrupted" if interrupted else "prediction_timeout"
                 camera.auto_predict_last_run_at = now
+                logger.error(
+                    "Runtime reconcile failed camera=%s error=%s interrupted=%s",
+                    camera.id, camera.auto_predict_last_run_error, interrupted,
+                )
 
     async def next_capture(self) -> UUID | None:
         async with self.db_context() as db:

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import signal
 import sys
@@ -9,6 +10,8 @@ from contextvars import ContextVar
 from weakref import WeakKeyDictionary
 
 from api.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class VisionError(Exception):
@@ -88,12 +91,14 @@ async def run_vision(
     loop = asyncio.get_running_loop()
     content = await asyncio.to_thread(lambda: json.dumps(payload, allow_nan=False).encode())
     if len(content) > settings.VISION_MAX_MESSAGE_BYTES:
+        logger.error("Vision error mode=%s message_bytes=%d limit=%d code=vision_message_too_large", mode, len(content), settings.VISION_MAX_MESSAGE_BYTES)
         raise VisionError("vision_message_too_large")
     process, task = None, None
     started = loop.time()
     try:
         async with asyncio.timeout(timeout_sec), vision_slot(timeout_sec, heartbeat):
             if heartbeat is not None and not await heartbeat():
+                logger.error("Vision cancelled mode=%s heartbeat=False", mode)
                 raise VisionError("vision_cancelled")
             env = os.environ.copy()
             for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
@@ -114,23 +119,31 @@ async def run_vision(
             while not task.done():
                 await asyncio.wait({task}, timeout=1)
                 if heartbeat is not None and not await heartbeat():
+                    logger.error("Vision cancelled mode=%s heartbeat=False", mode)
                     raise VisionError("vision_cancelled")
             output = task.result()
             if process.returncode in {124, 137, -signal.SIGKILL}:
+                logger.error("Vision timeout mode=%s returncode=%s", mode, process.returncode)
                 raise VisionError("vision_timeout")
             if process.returncode != 0:
+                logger.error("Vision failed mode=%s returncode=%s", mode, process.returncode)
                 raise VisionError("vision_failed")
             result = await asyncio.to_thread(json.loads, output)
             if not isinstance(result, dict):
+                logger.error("Vision failed mode=%s result_not_dict", mode)
                 raise VisionError("vision_failed")
             if "error" in result:
+                logger.error("Vision failed mode=%s subprocess_error=%s", mode, result["error"])
                 raise VisionError(result["error"])
             return result
     except TimeoutError:
+        logger.error("Vision timeout mode=%s timeout_sec=%s", mode, timeout_sec)
         raise VisionError("vision_timeout") from None
     except OSError:
+        logger.error("Vision runtime missing mode=%s", mode)
         raise VisionError("vision_runtime_missing") from None
     except (ValueError, TypeError):
+        logger.error("Vision failed mode=%s exception=value_or_type_error", mode)
         raise VisionError("vision_failed") from None
     finally:
         if process is not None and process.returncode is None:

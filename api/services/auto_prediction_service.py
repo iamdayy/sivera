@@ -181,6 +181,10 @@ class AutoPredictionRunner:
 
                 # Jika tidak ada waste mask: segera kirim frame asli (tidak ada measurement).
                 if not segmentation or not segmentation.get("has_mask"):
+                    logger.warning(
+                        "Automatic prediction no waste mask camera=%s run=%s frame=%dx%d",
+                        self.camera_id, self.token, event["frame_w"], event["frame_h"],
+                    )
                     event["skip_reason"] = "no_segmentation"
                     await self._publish(event)
                 else:
@@ -190,6 +194,10 @@ class AutoPredictionRunner:
                     # Stage 2: resolve prerequisite (DB only, tanpa vision slot).
                     async with self.db_context() as db:
                         if not await self._current_in_db(db):
+                            logger.warning(
+                                "Automatic prediction superseded camera=%s run=%s",
+                                self.camera_id, self.token,
+                            )
                             return None
                         calibration, ground, scale = await active_prerequisites(db, self.camera_id, "rtsp_frame")
                         context = measurement_context(camera, calibration, ground, scale)
@@ -209,14 +217,17 @@ class AutoPredictionRunner:
                         await self._publish(event)
         except asyncio.CancelledError:
             event["error_code"] = "prediction_interrupted"
+            logger.warning("Automatic prediction interrupted camera=%s run=%s", self.camera_id, self.token)
             await self._publish(event)
             await self.finish(event)
             raise
         except Exception as exc:
             code = "prediction_prerequisites_changed" if str(exc) == "prediction_prerequisites_changed" else prediction_error(exc)
             event["skip_reason"], event["error_code"] = code, code
-            logger.warning("Automatic prediction failed camera=%s run=%s code=%s exception=%s",
-                           self.camera_id, self.token, code, type(exc).__name__)
+            logger.error(
+                "Automatic prediction error camera=%s run=%s code=%s exception=%s:%s",
+                self.camera_id, self.token, code, type(exc).__name__, exc,
+            )
         event["completed_at"] = utcnow()
         if not await self.finish(event):
             return None

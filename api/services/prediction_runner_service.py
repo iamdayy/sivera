@@ -122,11 +122,15 @@ class PredictionRunner:
                 if await finish_io(self.complete(job, result, artifacts, timestamp, path)):
                     return result["summary"]
         except asyncio.CancelledError:
+            logger.error("Prediction interrupted job=%s", self.job_id)
             await self.fail("prediction_interrupted")
             raise
         except Exception as exc:
             code = prediction_error(exc)
-            logger.warning("Prediction failed job=%s code=%s exception=%s", self.job_id, code, type(exc).__name__)
+            logger.error(
+                "Prediction error job=%s code=%s exception=%s:%s",
+                self.job_id, code, type(exc).__name__, exc,
+            )
             await self.fail(code)
         finally:
             await artifacts.cleanup()
