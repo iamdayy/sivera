@@ -1,0 +1,15 @@
+# Mounted instead of the unrelated, local mediamtx.yml in the repository root.
+authMethod: internal
+authInternalUsers:
+  - user: any
+    ips: [127.0.0.1, "::1"]
+    permissions:
+      - action: api
+  - user: sivera_api
+    permissions:
+      - action: api
+  - user: sivera_reader
+    permissions:
+      - action: read
+        path: "~^sivera_[0-9a-f-]{36}$"
+paths: {}
