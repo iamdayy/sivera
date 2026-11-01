@@ -1,22 +1,101 @@
 import asyncio
+import json
 import logging
 from contextlib import suppress
 from datetime import timedelta
+from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import or_, select, text, update
-from sqlalchemy.ext.asyncio import AsyncEngine
+from fastapi import HTTPException, Request
+from sqlalchemy import func, or_, select, text, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm import raiseload
 
 from api.core.config import Settings, settings
 from api.core.database import DatabaseContext
 from api.core.storage import StorageBackend
 from api.models.orm import CalibrationCaptureSession, Camera, PredictionJob
-from api.runtime.events import EventHub
 from api.services.auto_prediction_service import AutoPredictionRunner, reset_auto_schedule
 from api.services.calibration_capture_service import ACTIVE_STATUSES, CaptureRunner, expire_session, finish, utcnow
 from api.services.calibration_compute_service import CalibrationComputeRunner, expire_computation, fail_compute
 from api.services.prediction_runner_service import PredictionRunner
+
+
+class EventHub:
+    def __init__(self, max_clients: int) -> None:
+        self.max_clients = max_clients
+        self.subscribers: dict[UUID, set[asyncio.Queue]] = {}
+        self.closed = False
+
+    @property
+    def client_count(self) -> int:
+        return sum(len(queues) for queues in self.subscribers.values())
+
+    def subscribe(self, camera_id: UUID) -> asyncio.Queue:
+        if self.closed:
+            raise ValueError("prediction_stream_unavailable")
+        if self.client_count >= self.max_clients:
+            raise ValueError("prediction_stream_capacity")
+        queue = asyncio.Queue(maxsize=1)
+        self.subscribers.setdefault(camera_id, set()).add(queue)
+        return queue
+
+    def unsubscribe(self, camera_id: UUID, queue: asyncio.Queue) -> None:
+        queues = self.subscribers.get(camera_id)
+        if queues is not None:
+            queues.discard(queue)
+            if not queues:
+                del self.subscribers[camera_id]
+
+    @staticmethod
+    def offer(queue: asyncio.Queue, value: str | None) -> None:
+        if queue.full():
+            queue.get_nowait()
+        queue.put_nowait(value)
+
+    async def publish(self, camera_id: UUID, event: dict) -> None:
+        if self.closed or camera_id not in self.subscribers:
+            return
+        payload = await asyncio.to_thread(json.dumps, event, allow_nan=False, separators=(",", ":"))
+        for queue in tuple(self.subscribers.get(camera_id, ())):
+            self.offer(queue, payload)
+
+    def close(self) -> None:
+        self.closed = True
+        for queues in self.subscribers.values():
+            for queue in queues:
+                self.offer(queue, None)
+        self.subscribers.clear()
+
+
+if TYPE_CHECKING:
+    from api.runtime.manager import LocalRuntime
+
+
+def require_runtime(request: Request) -> "LocalRuntime":
+    runtime = getattr(request.app.state, "runtime", None)
+    if runtime is None or runtime.status != "running":
+        raise HTTPException(status_code=503, detail={"code": "runtime_unavailable"}, headers={"Retry-After": "5"})
+    return runtime
+
+
+def notify_runtime(request: Request | None = None) -> None:
+    if request is not None:
+        runtime = getattr(request.app.state, "runtime", None)
+    else:
+        runtime = None
+    if runtime is not None:
+        runtime.notify()
+
+
+async def admit_job(db: AsyncSession, config: Settings = settings) -> None:
+    # Serialize admission until the caller commits its durable domain row.
+    await db.execute(text("SELECT pg_advisory_xact_lock(1397315137)"))
+    predictions = select(func.count()).select_from(PredictionJob).where(PredictionJob.status.in_(("pending", "processing"))).scalar_subquery()
+    captures = select(func.count()).select_from(CalibrationCaptureSession).where(CalibrationCaptureSession.status.in_(("queued", "running", "stopping"))).scalar_subquery()
+    computations = select(func.count()).select_from(CalibrationCaptureSession).where(CalibrationCaptureSession.compute_status.in_(("queued", "running"))).scalar_subquery()
+    if await db.scalar(select(predictions + captures + computations)) >= config.RUNTIME_MAX_PENDING_JOBS:
+        raise HTTPException(status_code=503, detail={"code": "runtime_queue_full"}, headers={"Retry-After": "5"})
 
 
 logger = logging.getLogger(__name__)

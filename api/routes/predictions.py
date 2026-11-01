@@ -27,8 +27,7 @@ from api.schemas.prediction import (
     DetectedInstanceResponse, VolumeEstimateResponse
 )
 from api.services.prediction_orchestrator import submit_prediction_job
-from api.runtime.queue import admit_job
-from api.runtime.dependencies import notify_runtime
+from api.runtime import admit_job, notify_runtime
 from api.services.image_service import decode_prediction_image
 from api.services.prediction_access_service import require_job
 from api.services.snapshot_service import latest_snapshot, require_rtsp_camera

@@ -13,7 +13,7 @@ from api.core.storage import StorageBackend
 from api.models.orm import Camera, PredictionJob
 from api.services.calibration_capture_service import utcnow
 from api.services.live_capture_service import capture_live_frame
-from api.services.prediction_codes import SAFE_ERRORS, prediction_error
+from api.services.prediction_result_service import SAFE_ERRORS, prediction_error
 from api.services.prediction_orchestrator import pinned_context, prediction_options
 from api.services.prediction_result_service import PredictionArtifacts, finish_io
 from api.services.snapshot_service import check_freshness, latest_snapshot, read_snapshot, require_rtsp_camera

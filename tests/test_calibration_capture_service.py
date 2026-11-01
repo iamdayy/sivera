@@ -296,8 +296,8 @@ async def test_source_change_between_storage_write_and_commit_discards_frame(run
 @pytest.mark.anyio
 async def test_queue_publish_failure_keeps_committed_outbox(monkeypatch):
     db = SimpleNamespace(scalar=AsyncMock(return_value=uuid4()), commit=AsyncMock())
-    from api.runtime import dependencies as runtime_deps
-    monkeypatch.setattr(runtime_deps, "notify_runtime", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("secret")))
+    import api.runtime as runtime_mod
+    monkeypatch.setattr(runtime_mod, "notify_runtime", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("secret")))
     await service.dispatch_capture(db, uuid4())
     db.commit.assert_awaited_once()
 

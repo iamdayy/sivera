@@ -27,10 +27,10 @@ def test_compute_outbox_retries_after_queue_failure(monkeypatch):
     @asynccontextmanager
     async def context():
         yield db
-    from api.runtime import dependencies as runtime_deps
+    import api.runtime as runtime_mod
     notified = []
     monkeypatch.setattr(service, "get_db_context", context)
-    monkeypatch.setattr(runtime_deps, "notify_runtime", lambda *a, **k: notified.append(True))
+    monkeypatch.setattr(runtime_mod, "notify_runtime", lambda *a, **k: notified.append(True))
     asyncio.run(service.reconcile_computations())
     assert session.compute_status == "queued"
     assert session.compute_dispatched_at is not None

@@ -18,6 +18,31 @@ from api.schemas.prediction import PREDICTION_OUTPUT_TYPES
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
+SAFE_ERRORS = {
+    "prediction_invalid_image", "prediction_image_too_large", "prediction_resolution_mismatch",
+    "calibration_intrinsics_missing", "calibration_invalid_intrinsics", "prediction_invalid_depth",
+    "prediction_invalid_points", "prediction_invalid_grid_parameters", "prediction_volume_grid_too_large",
+    "prediction_invalid_segmentation", "prediction_invalid_model", "prediction_encoding_failed",
+    "segmentation_model_unavailable", "segmentation_classes_unavailable", "depth_model_unavailable",
+    "depth_scale_identity_missing", "depth_scale_model_mismatch", "depth_scale_invalid_saved_fit",
+    "prediction_prerequisites_missing", "prediction_source_changed", "prediction_timeout",
+    "snapshot_not_found", "snapshot_stale", "snapshot_source_changed", "snapshot_requires_enabled_stream",
+    "capture_timeout", "capture_stream_unavailable", "capture_resolution_too_large", "capture_frame_too_large",
+    "capture_invalid_frame", "capture_stream_sync_pending", "capture_ffmpeg_missing", "capture_runtime_missing",
+    "stream_service_not_configured", "snapshot_image_missing", "snapshot_resolution_mismatch",
+    "snapshot_stream_sync_pending", "vision_message_too_large", "vision_runtime_missing",
+    "prediction_requires_calibration", "prediction_requires_ground_model", "prediction_requires_depth_scale",
+}
+
+
+def prediction_error(exc: Exception) -> str:
+    from api.services.vision_process_service import VisionError
+    from api.services.rtsp_capture_service import CaptureError
+    if isinstance(exc, TimeoutError) or isinstance(exc, VisionError) and exc.code == "vision_timeout":
+        return "prediction_timeout"
+    code = exc.code if isinstance(exc, (CaptureError, VisionError)) else str(exc) if isinstance(exc, ValueError) else ""
+    return code if code in SAFE_ERRORS else "prediction_processing_failed"
+
 
 async def finish_io(work: Awaitable[T]) -> T:
     # A cancelled storage thread must finish before attempt-owned files are removed.

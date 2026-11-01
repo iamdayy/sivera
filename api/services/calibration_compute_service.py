@@ -37,7 +37,7 @@ def expire_computation(session: CalibrationCaptureSession, config: Settings = se
 
 async def publish_computation(session_id: UUID) -> None:
     """Enqueue calibration computation through the runtime instead of Celery."""
-    from api.runtime.dependencies import notify_runtime
+    from api.runtime import notify_runtime
     try:
         notify_runtime(None)
     except Exception:

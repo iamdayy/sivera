@@ -15,7 +15,7 @@ from api.schemas.auto_prediction import AutoPredictConfig
 from api.services.calibration_capture_service import utcnow
 from api.services.live_capture_service import capture_live_frame
 from api.services.prediction_orchestrator import active_prerequisites, measurement_context
-from api.services.prediction_codes import prediction_error
+from api.services.prediction_result_service import prediction_error
 from api.services.prediction_result_service import PredictionArtifacts, finish_io, grid_volume, last_saved_volume
 from api.services.snapshot_service import check_freshness, source_hash
 from api.services.vision_process_service import run_vision, vision_slot

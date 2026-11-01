@@ -285,7 +285,7 @@ async def update_auto_predict_config(
     
     # Wake the runtime so it picks up the updated auto-predict schedule.
     try:
-        from api.runtime.dependencies import notify_runtime
+        from api.runtime import notify_runtime
         notify_runtime(None)
     except Exception:
         pass  # Best effort

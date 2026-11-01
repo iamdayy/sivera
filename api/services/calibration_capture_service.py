@@ -62,9 +62,7 @@ def expire_session(session: CalibrationCaptureSession, now: datetime, config: Se
 
 async def publish_capture(session_id: UUID) -> None:
     """Enqueue capture dispatch through the runtime instead of Celery."""
-    from api.runtime.dependencies import notify_runtime
-    # Import inside function to avoid circular imports at module load.
-    from api.runtime.events import event_hub
+    from api.runtime import notify_runtime
     # Wake the runtime loop so it picks up the new queued session.
     try:
         notify_runtime(None)
