@@ -18,25 +18,12 @@ services:
       timeout: 5s
       retries: 10
 
-  redis:
-    image: redis:7-alpine
-    container_name: waste-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   api:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: waste-api
-    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
     volumes:
       - ./api:/app/api
       - ./models:/models
@@ -48,13 +35,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql+asyncpg://waste:waste@postgres/waste_db
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - MODELS_DIR=/models
       - STORAGE_LOCAL_ROOT=/app/storage
       - DEBUG=true
@@ -72,150 +54,21 @@ services:
     env_file:
       - .env
 
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: waste-worker
-    command: celery -A api.workers.celery_app worker -Q prediction,celery --loglevel=info --concurrency=2 --hostname=prediction@%h
-    volumes:
-      - ./api:/app/api
-      - ./models:/models
-      - ./data:/data
-      - ./test:/app/test
-      - artifacts:/app/storage
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://waste:waste@postgres/waste_db
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
-      - MODELS_DIR=/models
-      - STORAGE_LOCAL_ROOT=/app/storage
-      - PYTHONPATH=/app
-      - MEDIAMTX_HOST=mediamtx
-      - MEDIAMTX_RTSP_PORT=8554
-      - MEDIAMTX_WEBRTC_PORT=8889
-      - MEDIAMTX_HLS_PORT=8888
-      - MEDIAMTX_API_PORT=9997
-      - MEDIAMTX_RTMP_PORT=1935
-      - MEDIAMTX_ENABLED=${MEDIAMTX_ENABLED:-false}
-      - STREAM_TIMEOUT=10
-      - STREAM_RETRY_ATTEMPTS=3
-      - STREAM_CAPTURE_TIMEOUT=${STREAM_CAPTURE_TIMEOUT:-15}
-    env_file:
-      - .env
-    healthcheck:
-      test: ["CMD", "celery", "-A", "api.workers.celery_app", "inspect", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-  capture-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: waste-capture-worker
-    command: celery -A api.workers.celery_app worker -Q capture --loglevel=info --concurrency=1 --hostname=capture@%h
-    volumes:
-      - ./api:/app/api
-      - artifacts:/app/storage
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://waste:waste@postgres/waste_db
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
-      - STORAGE_LOCAL_ROOT=/app/storage
-      - PYTHONPATH=/app
-      - MEDIAMTX_HOST=mediamtx
-      - MEDIAMTX_RTSP_PORT=8554
-      - MEDIAMTX_ENABLED=${MEDIAMTX_ENABLED:-false}
-      - STREAM_CAPTURE_TIMEOUT=${STREAM_CAPTURE_TIMEOUT:-15}
-    env_file:
-      - .env
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A api.workers.celery_app inspect ping -d capture@$$HOSTNAME"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  calibration-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: waste-calibration-worker
-    command: celery -A api.workers.celery_app worker -Q calibration --loglevel=info --concurrency=1 --hostname=calibration@%h
-    volumes:
-      - ./api:/app/api
-      - artifacts:/app/storage
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://waste:waste@postgres/waste_db
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
-      - STORAGE_LOCAL_ROOT=/app/storage
-      - PYTHONPATH=/app
-    env_file:
-      - .env
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A api.workers.celery_app inspect ping -d calibration@$$HOSTNAME"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
-  flower:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: waste-flower
-    command: celery -A api.workers.celery_app flower --port=5555 --basic_auth=user:pass
-    ports:
-      - "5555:5555"
-    depends_on:
-      - redis
-    environment:
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - PYTHONPATH=/app
-    working_dir: /app
-    volumes:
-      - ./api:/app/api
-    healthcheck:
-      test: ["CMD", "curl", "-f", "-u", "user:pass", "http://localhost:5555"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-
   mediamtx:
     image: bluenviron/mediamtx:1.20.0-ffmpeg
     container_name: waste-mediamtx
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     working_dir: /
     volumes:
       - ./deploy/mediamtx.yml:/mediamtx.yml:ro
     ports:
-      - "127.0.0.1:8554:8554"   # RTSP, backend containers use the internal network
-      - "127.0.0.1:8888:8888"   # HLS
-      - "127.0.0.1:8889:8889"   # WHEP signaling is proxied by the backend
-      - "127.0.0.1:1935:1935"   # RTMP
-      - "127.0.0.1:9997:9997"   # API
-      - "8189:8189/udp"   # WebRTC media (ICE)
+      - "127.0.0.1:8554:8554" # RTSP, backend containers use the internal network
+      - "127.0.0.1:8888:8888" # HLS
+      - "127.0.0.1:8889:8889" # WHEP signaling is proxied by the backend
+      - "127.0.0.1:1935:1935" # RTMP
+      - "127.0.0.1:9997:9997" # API
+      - "8189:8189/udp" # WebRTC media (ICE)
     environment:
       - MTX_API=true
       - MTX_APIADDRESS=:9997
@@ -236,10 +89,18 @@ services:
       - MTX_WEBRTCIPSFROMINTERFACES=false
       - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_WEBRTC_ADDITIONAL_HOSTS:-127.0.0.1}
     depends_on:
-      - redis
+      - postgres
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9997/v3/paths/list"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:9997/v3/paths/list",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -247,5 +108,4 @@ services:
 
 volumes:
   pgdata:
-  redisdata:
   artifacts:

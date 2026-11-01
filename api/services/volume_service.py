@@ -95,7 +95,7 @@ def _poly_to_mask(poly: List[List[float]], shape: Tuple[int, int]) -> np.ndarray
 
 def estimate_per_instance(
     instances: List[dict], lifted_npz: dict, img_shape: Tuple[int, int],
-    cell_m: float = 0.05, min_pts_per_cell: int = 2
+    cell_m: float = 0.05, min_pts_per_cell: int = 2, mask_transform=None,
 ) -> List[dict]:
     """Estimate volume per instance."""
     X, Y, H, uv = lifted_npz["X"], lifted_npz["Y"], lifted_npz["height"], lifted_npz["uv"]
@@ -105,6 +105,8 @@ def estimate_per_instance(
     for ins in instances:
         poly = ins["polygon"]
         m = _poly_to_mask(poly, (H_img, W_img))
+        if mask_transform is not None:
+            m = mask_transform(m)
         
         u_arr, v_arr = uv[:, 0], uv[:, 1]
         in_inst = m[v_arr, u_arr]

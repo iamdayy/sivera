@@ -10,12 +10,11 @@ import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
-from api.core.config import settings
+from api.core.config import Settings, settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import Camera, Calibration, GroundModel, DepthScale
 from api.services.image_service import encode_image
 from api.services.depth_model_service import depth_model_identity, validate_scale_model
-from api.services.depth_scale_service import validate_saved_scale
 
 # Lazy model cache: loads each YOLO depth model once per process
 _depth_model_cache: dict = {}
@@ -252,6 +251,31 @@ async def save_depth_scale(
     db.add(depth_scale)
     await db.flush()
     return depth_scale
+
+
+def validate_saved_scale(scale: DepthScale, config: Settings = settings) -> None:
+    values = [scale.scale_s, scale.offset_b, scale.clip_min_m, scale.clip_max_m,
+              scale.mean_residual_m, scale.max_residual_m]
+    residuals = np.asarray(scale.residuals, np.float64)
+    if (any(value is None for value in values) or not np.isfinite(values).all()
+            or scale.scale_s <= 0 or not 0 < scale.clip_min_m < scale.clip_max_m
+            or residuals.ndim != 1 or len(residuals) < 3 or not np.isfinite(residuals).all()
+            or not np.isclose(np.abs(residuals).mean(), scale.mean_residual_m)
+            or not np.isclose(np.abs(residuals).max(), scale.max_residual_m)
+            or scale.mean_residual_m > config.DEPTH_SCALE_MAX_MEAN_RESIDUAL_M
+            or scale.max_residual_m > config.DEPTH_SCALE_MAX_RESIDUAL_M):
+        raise ValueError("depth_scale_invalid_saved_fit")
+    if getattr(scale, "model_identity", None):
+        provenance = scale.fit_provenance
+        try:
+            from api.schemas.ground_ref import DepthScaleCreate, DepthMeasurement
+            body = DepthScaleCreate(known_distances=provenance["known_distances"],
+                clip_min_m=scale.clip_min_m, clip_max_m=scale.clip_max_m, depth_model=scale.depth_model)
+            truth = np.array([point.distance_m for point in body.known_distances])
+            if len(truth) != len(residuals) or (np.abs(residuals) / truth).max() > config.DEPTH_SCALE_MAX_RELATIVE_RESIDUAL:
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("depth_scale_invalid_saved_fit") from None
 
 
 async def run_depth_pipeline(

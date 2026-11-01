@@ -75,6 +75,15 @@ class Camera(Base):
         Geography(geometry_type="POLYGON", srid=4326), nullable=True
     )
     metadata_: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
+    auto_predict_config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Auto-prediction scheduler metadata
+    auto_predict_next_run: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    auto_predict_run_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    auto_predict_deadline_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    auto_predict_last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    auto_predict_last_saved_job_id: Mapped[Optional[uuid4]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    auto_predict_last_run_status: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    auto_predict_last_run_error: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -420,6 +429,8 @@ class PredictionJob(Base):
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    run_token: Mapped[Optional[UUIDType]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    deadline_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     
     # Relationships
     camera: Mapped["Camera"] = relationship(back_populates="prediction_jobs")

@@ -1,5 +1,6 @@
 """Database connection and session management."""
-from contextlib import asynccontextmanager
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -14,6 +15,9 @@ from api.core.config import settings
 class Base(DeclarativeBase):
     """Base class for all ORM models."""
     pass
+
+
+DatabaseContext = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 
 
 # Create async engine
@@ -41,7 +45,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         try:
             yield session
             await session.commit()
-        except Exception:
+        except BaseException:
             await session.rollback()
             raise
         finally:
@@ -50,12 +54,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 @asynccontextmanager
 async def get_db_context() -> AsyncGenerator[AsyncSession, None]:
-    """Context manager for DB session outside of FastAPI (e.g., workers)."""
+    """Independent transaction for API-owned background work."""
     async with async_session_factory() as session:
         try:
             yield session
             await session.commit()
-        except Exception:
+        except BaseException:
             await session.rollback()
             raise
         finally:

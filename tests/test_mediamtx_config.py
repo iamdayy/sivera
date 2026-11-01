@@ -28,7 +28,7 @@ def test_mediamtx_listener_environment(services: dict, protocol: str, port: int)
     assert f"MTX_{protocol}_ADDRESS" not in env
 
 
-@pytest.mark.parametrize("service", ["api", "worker"])
+@pytest.mark.parametrize("service", ["api"])
 @pytest.mark.parametrize("protocol", ["HLS", "WEBRTC"])
 def test_backend_ports_match_listeners(services: dict, service: str, protocol: str) -> None:
     listener = environment(services["mediamtx"])[f"MTX_{protocol}ADDRESS"]
@@ -84,10 +84,7 @@ def test_authenticated_read_and_control_users(services: dict) -> None:
 
 
 def test_shared_artifacts_and_separate_workers(services: dict) -> None:
-    for name in ("api", "worker", "capture-worker"):
+    for name in ("api",):
         assert "artifacts:/app/storage" in services[name]["volumes"]
         assert environment(services[name])["STORAGE_LOCAL_ROOT"] == "/app/storage"
-    assert "-Q prediction,celery" in services["worker"]["command"]
-    assert "-Q capture" in services["capture-worker"]["command"]
-    assert "--concurrency=1" in services["capture-worker"]["command"]
     assert "ffmpeg" in (ROOT / "Dockerfile").read_text().split("# Runtime stage")[1]

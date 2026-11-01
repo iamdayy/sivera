@@ -1,4 +1,5 @@
 """FastAPI application factory and main entry point."""
+import logging
 import mimetypes
 import asyncio
 from contextlib import suppress
@@ -11,14 +12,24 @@ from fastapi.openapi.utils import get_openapi
 from sqlalchemy import text
 
 from api.core.config import settings, STORAGE_ROOT
-from api.core.database import AsyncSession, get_db, init_db, close_db, engine
+from api.core.database import AsyncSession, get_db, get_db_context, init_db, close_db, engine
 from api.core.security import verify_api_key
 from api.core.storage import get_storage
-from api.routes import cameras, calibrations, calibration_captures, ground_refs, ground_reference_sources, predictions, streams, snapshots
+from api.routes import cameras, calibrations, calibration_captures, ground_refs, ground_reference_sources, predictions, streams, snapshots, public_predictions, public_stream
 from api.schemas.system import HealthResponse, RootResponse
 from api.services.mediamtx_service import MediaMTXService
 from api.services.stream_service import reconciliation_loop
 from api.services.calibration_capture_service import capture_reconciliation_loop
+from api.core.storage import StorageBackend
+from api.runtime import event_hub
+from api.runtime.manager import LocalRuntime
+
+
+# Configure logging
+logging.basicConfig(
+    level=settings.LOG_LEVEL,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
 
 
 @asynccontextmanager
@@ -31,16 +42,21 @@ async def lifespan(app: FastAPI):
         STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
     app.state.mediamtx = MediaMTXService()
     reconciler = asyncio.create_task(reconciliation_loop(app.state.mediamtx))
-    capture_reconciler = asyncio.create_task(capture_reconciliation_loop())
+
+    storage: StorageBackend = get_storage()
+    event_hub.max_clients = settings.SSE_MAX_CLIENTS
+    runtime = LocalRuntime(engine, get_db_context, storage, event_hub, settings)
+    app.state.runtime = runtime
+    await runtime.start()
+
     try:
         yield
     finally:
+        runtime.notify()
+        await runtime.stop()
         reconciler.cancel()
         with suppress(asyncio.CancelledError):
             await reconciler
-        capture_reconciler.cancel()
-        with suppress(asyncio.CancelledError):
-            await capture_reconciler
         await app.state.mediamtx.close()
         await close_db()
 
@@ -56,7 +72,8 @@ def custom_openapi() -> dict:
         description=(
             "## Waste Volume Estimation API\n\n"
             "Camera operations are mounted at `/api/v1/cameras`; `/files` serves protected artifacts.\n\n"
-            "- WebRTC playback uses backend-authenticated WHEP signaling; media flows directly from MediaMTX.\n"
+            "- WebRTC playback uses backend WHEP signaling; media flows directly from MediaMTX. "
+            "Public camera playback is available under `/api/v1/public/cameras/{camera_id}/stream/whep` without an API key.\n"
             "- RTSP calibration capture selects chessboard frames and queues computation. "
             "Computed calibrations are inactive until explicitly activated; multipart calibration upload "
             "is synchronous and activates its result.\n"
@@ -68,7 +85,7 @@ def custom_openapi() -> dict:
             "Volume is m³/L, footprint m², height meters; missing estimates remain null. "
             "BEV is a visualization, not a complete 3D reconstruction.\n\n"
             "### Authentication\n"
-            "Camera operations and artifact downloads require `X-API-Key`. "
+            "Operations under `/api/v1/cameras` and `/files` downloads require `X-API-Key`. "
             "`/`, `/health`, `/docs`, `/redoc`, and `/openapi.json` are public. "
             "Keys are configured through `VALID_API_KEYS` or stored hashed in PostgreSQL. "
             "Environment-configured keys have wildcard scopes and must not be embedded in browser builds. "
@@ -106,6 +123,7 @@ def custom_openapi() -> dict:
         tags=[
             {"name": "cameras", "description": "Camera registry and management"},
             {"name": "streams", "description": "Camera stream state and authenticated WebRTC/WHEP signaling"},
+            {"name": "public-stream", "description": "WHEP playback without an API key for enabled cameras. OPTIONS returns 204 capabilities, POST returns 201 SDP with a backend Location, and DELETE returns 204."},
             {"name": "calibrations", "description": "calibration:read/write. Synchronous multipart upload auto-activates; capture results require explicit activation. k_matrix is undistorted K."},
             {"name": "calibration-captures", "description": "calibration:read/write, camera-bound keys. PostgreSQL owns capture and computation progress; accepted-frame target, 300 stored frames maximum."},
             {"name": "snapshots", "description": "camera:write for synchronous capture, camera:read for latest/image. Original-resolution RTSP snapshots; reception timestamps, default freshness 30 seconds."},
@@ -125,19 +143,22 @@ def custom_openapi() -> dict:
         }
     }
     
-    for path_data in openapi_schema["paths"].values():
+    public_prefix = "/api/v1/public/"
+    for path, path_data in openapi_schema["paths"].items():
+        is_public_path = path.startswith(public_prefix)
         for operation in path_data.values():
             if not isinstance(operation, dict) or "operationId" not in operation:
                 continue
             # FastAPI emits this parameter from the actual authentication dependency.
             key_parameters = [parameter for parameter in operation.get("parameters", [])
                 if parameter.get("in") == "header" and parameter.get("name", "").lower() == "x-api-key"]
-            authenticated = bool(key_parameters)
+            # Public playback/prediction routes use optional_scope (no key required).
+            authenticated = bool(key_parameters) and not is_public_path
             operation["security"] = [{"ApiKeyAuth": []}] if authenticated else []
+            # Remove the duplicate x-api-key parameter for all operations (ApiKeyAuth supplies it in Swagger).
+            operation["parameters"] = [parameter for parameter in operation.get("parameters", [])
+                if not (parameter.get("in") == "header" and parameter.get("name", "").lower() == "x-api-key")]
             if authenticated:
-                # ApiKeyAuth supplies this header in Swagger; a second parameter would duplicate it.
-                operation["parameters"] = [parameter for parameter in operation.get("parameters", [])
-                    if not (parameter.get("in") == "header" and parameter.get("name", "").lower() == "x-api-key")]
                 operation["responses"].setdefault("401", {"description": "Invalid or inactive API key"})
                 operation["responses"].setdefault("403", {"description": "Required scope or camera access denied"})
     
@@ -227,6 +248,8 @@ app.include_router(ground_reference_sources.router, prefix="/api/v1/cameras/{cam
 app.include_router(ground_refs.model_router, prefix="/api/v1/cameras/{camera_id}/ground-models")
 app.include_router(ground_refs.depth_scale_router, prefix="/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales")
 app.include_router(predictions.router, prefix="/api/v1/cameras/{camera_id}/predict")
+app.include_router(public_predictions.router, prefix="/api/v1/public")
+app.include_router(public_stream.router, prefix="/api/v1/public")
 
 
 @app.get("/health", response_model=HealthResponse)

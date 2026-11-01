@@ -11,11 +11,12 @@ class Settings(BaseSettings):
     APP_NAME: str = "Waste Volume Estimation API"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
+    LOG_LEVEL: str = "INFO"
     
     # API
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
-    API_WORKERS: int = 4
+    API_WORKERS: int = Field(1, ge=1, le=1)
     API_PREFIX: str = "/api/v1"
     
     # Security
@@ -30,12 +31,15 @@ class Settings(BaseSettings):
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
     
-    # Redis / Celery
-    REDIS_URL: str = "redis://localhost:6379/0"
-    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
-    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
-    CELERY_TASK_TRACK_STARTED: bool = True
-    CELERY_TASK_TIME_LIMIT: int = 300  # 5 minutes
+    # API-owned job runtime
+    RUNTIME_ENABLED: bool = True
+    RUNTIME_POLL_INTERVAL_SEC: float = Field(1, ge=0.1, le=30)
+    RUNTIME_SHUTDOWN_GRACE_SEC: float = Field(10, ge=0, le=60)
+    RUNTIME_MAX_PENDING_JOBS: int = Field(100, ge=1, le=1000)
+    PREDICTION_TIMEOUT_SEC: int = Field(300, ge=10, le=900)
+    VISION_MAX_MESSAGE_BYTES: int = Field(134217728, ge=1048576, le=536870912)
+    VISION_CPU_THREADS: int = Field(1, ge=1, le=8)
+    SSE_MAX_CLIENTS: int = Field(100, ge=1, le=1000)
     
     # Upload limits
     MAX_UPLOAD_SIZE_MB: int = 10  # maximum upload size in megabytes
@@ -51,7 +55,7 @@ class Settings(BaseSettings):
     
     # Models
     MODELS_DIR: str = "/models"
-    DEFAULT_SEG_MODEL: str = "yolo11s-seg.pt"
+    DEFAULT_SEG_MODEL: str = "yolo26n-seg.pt"
     DEFAULT_DEPTH_MODEL: str = "yolo26n-depth.pt"
     
     # Processing defaults
@@ -70,6 +74,18 @@ class Settings(BaseSettings):
     DEPTH_SCALE_MAX_RESIDUAL_M: float = Field(0.5, gt=0, allow_inf_nan=False)
     DEPTH_SCALE_MAX_RELATIVE_RESIDUAL: float = Field(0.1, gt=0, le=1, allow_inf_nan=False)
     
+    # Auto-prediction defaults
+    DEFAULT_AUTO_PREDICT_INTERVAL_SEC: int = Field(30, ge=5, le=3600)
+    DEFAULT_AUTO_PREDICT_SOURCE_TYPE: str = "rtsp_frame"
+    DEFAULT_AUTO_PREDICT_SEG_MODEL: str = "yolo26n-seg.pt"
+    DEFAULT_AUTO_PREDICT_SEG_CONF: float = Field(0.25, ge=0.0, le=1.0)
+    DEFAULT_AUTO_PREDICT_VOLUME_CELL_M: float = Field(0.05, gt=0, le=1.0)
+    DEFAULT_AUTO_PREDICT_VOLUME_MIN_PTS: int = Field(2, ge=1, le=10000)
+    DEFAULT_AUTO_PREDICT_MAX_FRAME_AGE_SEC: int = Field(10, ge=1, le=300)
+    DEFAULT_AUTO_PREDICT_RETURN_OUTPUTS: list = [
+        "mask", "overlay", "bev_overlay", "volume_heatmap"
+    ]
+
     # Calibration defaults
     DEFAULT_CHESSBOARD_COLS: int = 9
     DEFAULT_CHESSBOARD_ROWS: int = 6
@@ -116,6 +132,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=True,
         enable_decoding=False,
+        extra="ignore",
     )
 
     @property

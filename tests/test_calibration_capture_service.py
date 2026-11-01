@@ -15,8 +15,6 @@ from api.models.orm import CalibrationCaptureImage, CalibrationCaptureSession
 from api.schemas.calibration_capture import CaptureCreate
 from api.services import calibration_capture_service as service
 from api.services import rtsp_capture_service as rtsp
-from api.workers.celery_app import celery_app
-from api.workers.tasks.capture_task import run_capture_task
 
 
 @pytest.fixture
@@ -298,7 +296,8 @@ async def test_source_change_between_storage_write_and_commit_discards_frame(run
 @pytest.mark.anyio
 async def test_queue_publish_failure_keeps_committed_outbox(monkeypatch):
     db = SimpleNamespace(scalar=AsyncMock(return_value=uuid4()), commit=AsyncMock())
-    monkeypatch.setattr(service, "publish_capture", AsyncMock(side_effect=RuntimeError("secret")))
+    from api.runtime import dependencies as runtime_deps
+    monkeypatch.setattr(runtime_deps, "notify_runtime", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("secret")))
     await service.dispatch_capture(db, uuid4())
     db.commit.assert_awaited_once()
 
@@ -311,13 +310,17 @@ async def test_reconciler_dispatches_queued_sessions_after_restart(monkeypatch):
     async def context():
         yield db
     monkeypatch.setattr(service, "get_db_context", context)
-    publish = AsyncMock()
-    monkeypatch.setattr(service, "publish_capture", publish)
+    published = []
+    async def fake_publish(session_id):
+        published.append(session_id)
+    monkeypatch.setattr(service, "publish_capture", fake_publish)
     await service.reconcile_captures()
-    publish.assert_awaited_once_with(session.id)
+    assert len(published) == 1
+    assert published[0] == session.id
     assert session.last_dispatched_at is not None
+    published.clear()
     await service.reconcile_captures()
-    assert publish.await_count == 1
+    assert len(published) == 0
 
 
 def test_local_write_failure_keeps_existing_artifact(tmp_path):
@@ -333,11 +336,10 @@ def test_local_write_failure_keeps_existing_artifact(tmp_path):
 
 
 def test_capture_queue_is_separate_and_bounded():
-    assert celery_app.conf.task_default_queue == "prediction"
-    assert celery_app.conf.task_routes[run_capture_task.name]["queue"] == "capture"
-    assert "api.workers.tasks.capture_task" in celery_app.conf.include
-    assert run_capture_task.time_limit == 960
-    assert run_capture_task.reject_on_worker_lost is True
+    # The runtime owns a single bounded queue instead of separate Celery queues.
+    from api.core.config import settings
+    assert settings.RUNTIME_MAX_PENDING_JOBS == 100
+    assert settings.VISION_CPU_THREADS == 1
 
 
 @pytest.mark.anyio

@@ -1,176 +1,82 @@
-"""Prediction orchestrator: chains all services for the predict pipeline."""
-import io
+"""Prediction prerequisites, pinned context and image-coordinate contract."""
 import asyncio
-from datetime import datetime
-from typing import List, Optional
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import cv2
 import numpy as np
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import raiseload
 
-from api.core.storage import get_storage, generate_storage_key
-from api.models.orm import (
-    Camera, Calibration, GroundModel, GroundReference, DepthScale,
-    PredictionJob, PredictionOutput
-)
-from api.services.image_service import encode_image
-from api.services.segment_service import run_segmentation
-from api.services.ground_model_service import compute_bev
-from api.services.depth_service import run_depth_pipeline
+from api.core.config import settings
+from api.models.orm import Camera, Calibration, GroundModel, GroundReference, DepthScale, PredictionJob
 from api.services.depth_model_service import validate_scale_model
 from api.services.depth_scale_service import validate_saved_scale
-from api.services.volume_service import save_volume_results, build_job_summary
 
 
-async def run_prediction_pipeline(
-    db: AsyncSession,
-    job: PredictionJob,
-    image: np.ndarray,
-) -> dict:
-    """
-    Run the complete prediction pipeline:
-    1. Load the prerequisite versions pinned at submission
-    2. Undistort image
-    3. Segmentation (YOLO-seg) -> mask + instances
-    4. Depth prediction -> scale -> lift to ground
-    5. Volume estimation (grid + convex hull + per-instance)
-    6. BEV projection
-    7. Save all outputs and metadata
-    """
-    storage = get_storage()
+def prediction_options(job: PredictionJob) -> dict:
+    return {name: getattr(job, name) for name in (
+        "source_type", "seg_model", "seg_conf", "seg_classes", "volume_cell_m",
+        "volume_min_pts_per_cell", "return_outputs", "max_frame_age_sec",
+    )}
 
-    def add_output(output: PredictionOutput) -> None:
-        if job.return_outputs is None or output.output_type in job.return_outputs:
-            db.add(output)
-    
-    # Load related objects
-    calibration = await db.get(Calibration, job.calibration_id)
-    ground_model = await db.get(GroundModel, job.ground_model_id)
-    depth_scale = await db.get(DepthScale, job.depth_scale_id)
-    
-    if not calibration or not ground_model or not depth_scale:
-        raise ValueError("prediction_prerequisites_missing")
-    if (calibration.camera_id != job.camera_id or ground_model.camera_id != job.camera_id
-            or ground_model.calibration_id != calibration.id or depth_scale.camera_id != job.camera_id
-            or depth_scale.ground_model_id != ground_model.id):
-        raise ValueError("prediction_prerequisites_missing")
-    
-    camera = await db.get(Camera, job.camera_id)
-    if camera is None:
-        raise ValueError("prediction_prerequisites_missing")
-    undist = prepare_prediction_image(image, calibration, camera, job.source_type)
-    # Release prerequisite reads before model inference; completion is committed by the worker.
-    await db.commit()
-    
-    seg_results = await run_segmentation(db, job, undist, None)
-    instances = seg_results["instances"]
-    waste_mask = seg_results["waste_mask"]
-    
-    # Save mask output record
-    mask_output = PredictionOutput(
-        job_id=job.id, output_type="mask",
-        file_path=seg_results["mask_key"], mime_type="image/png",
-        width=undist.shape[1], height=undist.shape[0],
-        meta={"waste_pixels": seg_results["total_waste_pixels"], "mask_diagnostics": seg_results.get("mask_diagnostics")}
-    )
-    add_output(mask_output)
-    
-    overlay_output = PredictionOutput(
-        job_id=job.id, output_type="overlay",
-        file_path=seg_results["overlay_key"], mime_type="image/jpeg",
-        width=undist.shape[1], height=undist.shape[0],
-    )
-    add_output(overlay_output)
-    
-    instances_output = PredictionOutput(
-        job_id=job.id, output_type="instances_json",
-        file_path=seg_results["instances_json_key"], mime_type="application/json",
-    )
-    add_output(instances_output)
-    
-    # 3. DEPTH PIPELINE
-    depth_results = await run_depth_pipeline(
-        db, camera, calibration, ground_model, depth_scale,
-        undist, waste_mask.astype(np.uint8), str(job.id)
-    )
-    
-    # Save depth outputs
-    for out_type, key in [
-        ("depth_raw_vis", depth_results["depth_raw_key"]),
-        ("depth_scaled_vis", depth_results["depth_scaled_key"]),
-        ("depth_masked", depth_results["depth_masked_key"]),
-        ("height_map", depth_results["height_map_key"]),
-    ]:
-        add_output(PredictionOutput(
-            job_id=job.id, output_type=out_type, file_path=key,
-            mime_type="image/jpeg", width=undist.shape[1], height=undist.shape[0],
-        ))
-    
-    lifted_output = PredictionOutput(
-        job_id=job.id, output_type="lifted_points_npz",
-        file_path=depth_results["lifted_points_key"],
-        mime_type="application/octet-stream",
-    )
-    add_output(lifted_output)
-    
-    # 4. VOLUME ESTIMATION
-    # Load lifted points
-    with storage.get(depth_results["lifted_points_key"]) as stream, np.load(stream, allow_pickle=False) as lifted_data:
-        X, Y, H, uv = lifted_data["X"], lifted_data["Y"], lifted_data["height"], lifted_data["uv"]
-    
-    volume_results = await save_volume_results(
-        db, job, X, Y, H, uv, instances, undist.shape[:2],
-        cell_m=job.volume_cell_m, min_pts_per_cell=job.volume_min_pts_per_cell
-    )
-    
-    # Save volume outputs
-    add_output(PredictionOutput(
-        job_id=job.id, output_type="volume_heatmap",
-        file_path=volume_results["volume_heatmap_key"], mime_type="image/jpeg",
-    ))
-    add_output(PredictionOutput(
-        job_id=job.id, output_type="volume_result_npz",
-        file_path=volume_results["volume_npz_key"], mime_type="application/octet-stream",
-    ))
-    
-    # 5. BEV PROJECTION
-    gm_dict = {
-        "H_i2w": np.array(ground_model.H_i2w, np.float64),
-        "H_w2i": np.array(ground_model.H_w2i, np.float64),
-        "R": np.array(ground_model.R_matrix, np.float64),
-        "t": np.array(ground_model.t_vector, np.float64).reshape(3, 1),
-        "K": np.array(calibration.k_matrix, np.float64),
-        "cam_height": ground_model.cam_height,
-        "pitch_down_deg": ground_model.pitch_down_deg,
+
+def measurement_context(camera: Camera, calibration: Calibration, ground: GroundModel, scale: DepthScale) -> dict:
+    def fields(row, names):
+        return {name: getattr(row, name) for name in names.split()}
+
+    return {
+        "ids": {"calibration_id": str(calibration.id), "ground_model_id": str(ground.id), "depth_scale_id": str(scale.id)},
+        "camera": fields(camera, "resolution_w resolution_h"),
+        "calibration": fields(calibration, "k_matrix k_original k_undist dist_coeffs resolution_w resolution_h"),
+        "ground_model": fields(ground, "R_matrix t_vector H_i2w H_w2i cam_height pitch_down_deg bev_ppm bev_margin_m"),
+        "depth_scale": fields(scale, "depth_model model_identity fit_provenance scale_s offset_b residuals mean_residual_m max_residual_m clip_min_m clip_max_m"),
     }
-    
-    bev_img, bev_mask, bev_overlay, bev_info = compute_bev(
-        undist, waste_mask.astype(np.uint8), gm_dict,
-        ppm=ground_model.bev_ppm, margin_m=ground_model.bev_margin_m
-    )
-    
-    # Save BEV outputs
-    for out_type, img_data in [
-        ("bev_image", bev_img),
-        ("bev_mask_proyeksi", bev_mask),
-        ("bev_overlay", bev_overlay),
-    ]:
-        key = generate_storage_key(str(job.camera_id), str(job.id), out_type, "jpg")
-        buf = io.BytesIO(encode_image(img_data, ".jpg"))
-        storage.save(key, buf, "image/jpeg")
-        
-        add_output(PredictionOutput(
-            job_id=job.id, output_type=out_type, file_path=key,
-            mime_type="image/jpeg", width=img_data.shape[1], height=img_data.shape[0],
-            meta={"bev_info": bev_info} if out_type == "bev_image" else None,
-        ))
-    
-    # 6. Build summary and update job
-    summary = build_job_summary(waste_mask, instances, volume_results, depth_results)
-    
-    return summary
+
+
+async def active_prerequisites(db: AsyncSession, camera_id: UUID, source_type: str) -> tuple[Calibration, GroundModel, DepthScale]:
+    calibration = (await db.execute(
+        select(Calibration).options(raiseload("*")).where(Calibration.camera_id == camera_id, Calibration.is_active.is_(True))
+        .order_by(Calibration.version.desc()).limit(1)
+    )).scalar_one_or_none()
+    if calibration is None:
+        raise ValueError("prediction_requires_calibration")
+    if source_type != "upload" and (calibration.k_original is None or not calibration.resolution_w or not calibration.resolution_h):
+        raise ValueError("calibration_intrinsics_missing")
+    ground = (await db.execute(
+        select(GroundModel).options(raiseload("*")).join(GroundModel.ground_reference)
+        .where(GroundModel.camera_id == camera_id, GroundModel.calibration_id == calibration.id,
+               GroundReference.camera_id == camera_id, GroundReference.calibration_id == calibration.id,
+               GroundReference.is_active.is_(True))
+        .order_by(GroundReference.version.desc(), GroundModel.created_at.desc(), GroundModel.id.desc()).limit(1)
+    )).scalar_one_or_none()
+    if ground is None:
+        raise ValueError("prediction_requires_ground_model")
+    scale = (await db.execute(
+        select(DepthScale).options(raiseload("*")).where(
+            DepthScale.camera_id == camera_id, DepthScale.ground_model_id == ground.id, DepthScale.is_active.is_(True),
+        ).order_by(DepthScale.created_at.desc(), DepthScale.id.desc()).limit(1)
+    )).scalar_one_or_none()
+    if scale is None:
+        raise ValueError("prediction_requires_depth_scale")
+    return calibration, ground, scale
+
+
+async def pinned_context(db: AsyncSession, job: PredictionJob) -> dict:
+    calibration = await db.get(Calibration, job.calibration_id, options=[raiseload("*")])
+    ground = await db.get(GroundModel, job.ground_model_id, options=[raiseload("*")])
+    scale = await db.get(DepthScale, job.depth_scale_id, options=[raiseload("*")])
+    camera = await db.get(Camera, job.camera_id, options=[raiseload("*")])
+    if (camera is None or calibration is None or ground is None or scale is None
+            or calibration.camera_id != job.camera_id or ground.camera_id != job.camera_id
+            or ground.calibration_id != calibration.id or scale.camera_id != job.camera_id
+            or scale.ground_model_id != ground.id):
+        raise ValueError("prediction_prerequisites_missing")
+    reference = await db.get(GroundReference, ground.ground_ref_id, options=[raiseload("*")])
+    if reference is None or reference.camera_id != job.camera_id or reference.calibration_id != calibration.id:
+        raise ValueError("prediction_prerequisites_missing")
+    return measurement_context(camera, calibration, ground, scale)
 
 
 def prepare_prediction_image(image: np.ndarray, calibration: Calibration, camera: Camera, source_type: str) -> np.ndarray:
@@ -205,72 +111,24 @@ def prepare_prediction_image(image: np.ndarray, calibration: Calibration, camera
 
 
 async def submit_prediction_job(
-    db: AsyncSession,
-    camera_id: UUID,
-    source_type: str,
-    source_path: Optional[str] = None,
-    source_ts: Optional[datetime] = None,
-    seg_model: Optional[str] = None,
-    seg_conf: float = 0.25,
-    seg_classes: Optional[List[str]] = None,
-    volume_cell_m: float = 0.05,
-    volume_min_pts_per_cell: int = 2,
-    return_outputs: Optional[List[str]] = None,
-    max_frame_age_sec: int = 30,
-    source_hash: str | None = None,
+    db: AsyncSession, camera_id: UUID, source_type: str,
+    source_path: str | None = None, source_ts: datetime | None = None,
+    seg_model: str | None = None, seg_conf: float = 0.25, seg_classes: list[str] | None = None,
+    volume_cell_m: float = 0.05, volume_min_pts_per_cell: int = 2,
+    return_outputs: list[str] | None = None, max_frame_age_sec: int = 30, source_hash: str | None = None,
 ) -> PredictionJob:
-    """Pin compatible prerequisite versions; the route dispatches after commit."""
-    # Get active calibration, ground model, depth scale for camera
-    calib_result = await db.execute(
-        select(Calibration).where(Calibration.camera_id == camera_id, Calibration.is_active == True)
-        .order_by(Calibration.version.desc()).limit(1)
-    )
-    calibration = calib_result.scalar_one_or_none()
-    if not calibration:
-        raise ValueError("prediction_requires_calibration")
-    if source_type != "upload" and (calibration.k_original is None or not calibration.resolution_w or not calibration.resolution_h):
-        raise ValueError("calibration_intrinsics_missing")
-    
-    gr_result = await db.execute(
-        select(GroundModel).join(GroundModel.ground_reference)
-        .where(GroundModel.camera_id == camera_id, GroundModel.calibration_id == calibration.id,
-               GroundReference.camera_id == camera_id, GroundReference.calibration_id == calibration.id,
-               GroundReference.is_active == True)
-        .order_by(GroundReference.version.desc(), GroundModel.created_at.desc()).limit(1)
-    )
-    ground_model = gr_result.scalar_one_or_none()
-    if not ground_model:
-        raise ValueError("prediction_requires_ground_model")
-    
-    ds_result = await db.execute(
-        select(DepthScale)
-        .where(DepthScale.camera_id == camera_id, DepthScale.ground_model_id == ground_model.id, DepthScale.is_active == True)
-        .order_by(DepthScale.created_at.desc()).limit(1)
-    )
-    depth_scale = ds_result.scalar_one_or_none()
-    if not depth_scale:
-        raise ValueError("prediction_requires_depth_scale")
-    await asyncio.to_thread(validate_scale_model, depth_scale)
-    validate_saved_scale(depth_scale)
-    
-    # Create job
+    calibration, ground, scale = await active_prerequisites(db, camera_id, source_type)
+    await asyncio.to_thread(validate_scale_model, scale)
+    validate_saved_scale(scale)
+    now = datetime.now(timezone.utc)
     job = PredictionJob(
-        camera_id=camera_id,
-        calibration_id=calibration.id,
-        ground_model_id=ground_model.id,
-        depth_scale_id=depth_scale.id,
-        status="pending",
-        source_type=source_type,
-        source_path=source_path,
-        source_ts=source_ts,
-        seg_model=seg_model,
-        seg_conf=seg_conf,
-        seg_classes=seg_classes,
-        return_outputs=return_outputs,
+        camera_id=camera_id, calibration_id=calibration.id, ground_model_id=ground.id, depth_scale_id=scale.id,
+        status="pending", source_type=source_type, source_path=source_path, source_ts=source_ts,
+        seg_model=seg_model, seg_conf=seg_conf, seg_classes=seg_classes, return_outputs=return_outputs,
         volume_cell_m=volume_cell_m, volume_min_pts_per_cell=volume_min_pts_per_cell,
         max_frame_age_sec=max_frame_age_sec, source_hash=source_hash,
+        created_at=now, deadline_at=now + timedelta(seconds=settings.CAPTURE_QUEUE_TIMEOUT_SEC),
     )
     db.add(job)
     await db.flush()
-    
     return job

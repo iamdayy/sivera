@@ -14,7 +14,7 @@ from api.models.orm import Camera, CameraSnapshot
 from api.services.calibration_capture_service import utcnow
 from api.services.mediamtx_service import MediaMTXError, validate_rtsp_source
 from api.services.rtsp_capture_service import CaptureError, CapturedFrame, capture_frame, check_relay_source, decode_frame
-from api.workers.database import DatabaseContext
+from api.core.database import DatabaseContext
 
 
 def source_hash(source: str, config: Settings = settings) -> str:

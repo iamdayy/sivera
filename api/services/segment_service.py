@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.core.config import settings
+from api.core.config import Settings, settings
 from api.core.storage import get_storage, generate_storage_key
 from api.models.orm import PredictionJob
 from api.services.image_service import encode_image
@@ -125,34 +125,30 @@ def overlay_instances(image_bgr: np.ndarray, instances: List[dict], alpha: float
     return out
 
 
-async def run_segmentation(
-    db: AsyncSession,
-    job: PredictionJob,
-    image: np.ndarray,
-    mask: np.ndarray,
-) -> dict:
-    """Run segmentation and save outputs."""
-    storage = get_storage()
-    
-    # Load segmentation model
-    seg_model_path = Path(settings.MODELS_DIR) / (job.seg_model or settings.DEFAULT_SEG_MODEL)
-    if not seg_model_path.exists():
-        raise FileNotFoundError(f"Segmentation model not found: {job.seg_model or settings.DEFAULT_SEG_MODEL} (looked in {settings.MODELS_DIR})")
+def compute_segmentation(job: PredictionJob, image: np.ndarray, config: Settings = settings) -> dict:
+    """Compute masks in RAM; callers decide whether to persist any outputs."""
+    name = job.seg_model or config.DEFAULT_SEG_MODEL
+    root = Path(config.MODELS_DIR).resolve()
+    seg_model_path = (root / name).resolve()
+    if Path(name).name != name or "\\" in name or not seg_model_path.is_relative_to(root):
+        raise ValueError("prediction_invalid_model")
+    if not seg_model_path.is_file():
+        raise ValueError("segmentation_model_unavailable")
     
     waste_classes = job.seg_classes or ["Sampah_Berserakan", "Sampah_Overload"]
     
     # Predict instances
     instances, names = predict_instances(
         image, str(seg_model_path),
-        device="cpu", imgsz=settings.DEFAULT_SEG_IMGSZ,
-        conf=job.seg_conf
+        device="cpu", imgsz=config.DEFAULT_SEG_IMGSZ,
+        conf=job.seg_conf, iou=config.DEFAULT_SEG_IOU,
     )
     
     # Check if waste classes exist in model
     have = {norm(v) for v in names.values()} if isinstance(names, dict) else {norm(v) for v in names}
     missing = [c for c in waste_classes if norm(c) not in have]
     if missing:
-        raise ValueError(f"Classes {missing} not found in model. Available: {sorted(have)}")
+        raise ValueError("segmentation_classes_unavailable")
     
     # Create masks per class
     h, w = image.shape[:2]
@@ -171,7 +167,25 @@ async def run_segmentation(
         "added_pixels": int((waste_mask & ~raw_mask).sum()),
         "open_px": 0, "close_px": 5, "min_area_px": 30,
     }
-    
+    return {
+        "instances": [dict(cls=i["cls"], conf=i["conf"], polygon=i["poly"].tolist()) for i in instances],
+        "waste_mask": waste_mask, "class_masks": class_masks_dict,
+        "total_waste_pixels": int(waste_mask.sum()), "waste_fraction": float(waste_mask.mean()),
+        "mask_diagnostics": diagnostics,
+    }
+
+
+async def run_segmentation(
+    db: AsyncSession, job: PredictionJob, image: np.ndarray, mask: np.ndarray,
+) -> dict:
+    """Legacy artifact adapter; interval inference uses compute_segmentation."""
+    storage = get_storage()
+    result = compute_segmentation(job, image)
+    class_masks_dict, waste_mask = result["class_masks"], result["waste_mask"]
+    diagnostics = result["mask_diagnostics"]
+    instances = [{"cls": item["cls"], "conf": item["conf"], "poly": np.asarray(item["polygon"])}
+                 for item in result["instances"]]
+
     # Save individual class masks
     for cls_name, cls_mask in class_masks_dict.items():
         key = generate_storage_key(str(job.camera_id), str(job.id), f"mask_{norm(cls_name)}", "png")

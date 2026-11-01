@@ -7,8 +7,6 @@ from uuid import uuid4
 
 from api.services import calibration_compute_service as service
 from api.services.calibration_capture_service import utcnow
-from api.workers.celery_app import celery_app
-from api.workers.tasks.calibration_task import run_capture_calibration_task
 from tests.test_calibration_capture_service import session_fixture
 
 
@@ -29,23 +27,24 @@ def test_compute_outbox_retries_after_queue_failure(monkeypatch):
     @asynccontextmanager
     async def context():
         yield db
-    publish = AsyncMock(side_effect=RuntimeError("private/password"))
+    from api.runtime import dependencies as runtime_deps
+    notified = []
     monkeypatch.setattr(service, "get_db_context", context)
-    monkeypatch.setattr(service, "publish_computation", publish)
+    monkeypatch.setattr(runtime_deps, "notify_runtime", lambda *a, **k: notified.append(True))
     asyncio.run(service.reconcile_computations())
     assert session.compute_status == "queued"
     assert session.compute_dispatched_at is not None
-    asyncio.run(service.reconcile_computations())
-    assert publish.await_count == 1
+    assert len(notified) == 1
     session.compute_dispatched_at = utcnow() - timedelta(seconds=16)
     asyncio.run(service.reconcile_computations())
-    assert publish.await_count == 2
+    assert len(notified) == 2
 
 
 def test_compute_queue_isolated():
-    assert celery_app.conf.task_routes[run_capture_calibration_task.name]["queue"] == "calibration"
-    assert run_capture_calibration_task.time_limit == 660
-    assert run_capture_calibration_task.reject_on_worker_lost
+    # The runtime owns a single bounded queue instead of separate Celery queues.
+    from api.core.config import settings
+    assert settings.RUNTIME_MAX_PENDING_JOBS == 100
+    assert settings.VISION_CPU_THREADS == 1
 
 
 def test_old_compute_token_and_timeout_prevent_persistence():

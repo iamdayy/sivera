@@ -14,7 +14,12 @@ from api.services.rtsp_capture_service import decode_frame
 def main() -> None:
     try:
         payload = json.load(sys.stdin)
-        if sys.argv[1] == "assess":
+        if sys.argv[1] in {"segment", "measure", "predict"}:
+            import contextlib
+            from api.services.prediction_compute_service import compute_request
+            with contextlib.redirect_stdout(sys.stderr):
+                result = compute_request(sys.argv[1], payload)
+        elif sys.argv[1] == "assess":
             config = Settings(_env_file=None, CALIB_CAPTURE_MIN_SHARPNESS=payload["min_sharpness"],
                               CAPTURE_MAX_FRAME_BYTES=payload["max_frame_bytes"], CAPTURE_MAX_PIXELS=payload["max_pixels"])
             frame = decode_frame(base64.b64decode(payload["image"]), config)
@@ -84,7 +89,8 @@ def main() -> None:
             raise ValueError("vision_failed")
     except ValueError as exc:
         code = str(exc)
-        result = {"error": code if code in {"calibration_insufficient_images", "calibration_invalid_corners", "calibration_invalid_result", "calibration_invalid_parameters", "depth_scale_invalid_depth", "depth_scale_pixel_out_of_bounds", "depth_scale_degenerate_fit", "depth_scale_poor_fit", "depth_scale_model_mismatch", "depth_model_unavailable"} else "vision_failed"}
+        from api.services.prediction_compute_service import COMPUTE_ERRORS
+        result = {"error": code if code in COMPUTE_ERRORS | {"calibration_insufficient_images", "calibration_invalid_corners", "calibration_invalid_result", "calibration_invalid_parameters", "depth_scale_invalid_depth", "depth_scale_pixel_out_of_bounds", "depth_scale_degenerate_fit", "depth_scale_poor_fit", "depth_scale_model_mismatch", "depth_model_unavailable"} else "vision_failed"}
     except Exception:
         result = {"error": "vision_failed"}
     print(json.dumps(result, allow_nan=False))

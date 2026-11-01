@@ -24,19 +24,20 @@ def setup(monkeypatch, tmp_path):
     db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: camera))
     job = SimpleNamespace(id=uuid4(), status="pending")
     submit = AsyncMock(return_value=job)
-    queue = MagicMock()
+    admit_job = AsyncMock(return_value=None)
     storage = LocalStorage(tmp_path)
     monkeypatch.setattr(predictions, "submit_prediction_job", submit)
     monkeypatch.setattr(predictions, "require_rtsp_camera", lambda _: "source-identity")
     monkeypatch.setattr(predictions, "latest_snapshot", AsyncMock())
     monkeypatch.setattr(predictions, "get_storage", lambda: storage)
-    monkeypatch.setattr(predictions.celery_app, "send_task", queue)
+    monkeypatch.setattr(predictions, "admit_job", admit_job)
+    monkeypatch.setattr(predictions, "notify_runtime", lambda *a, **k: None)
     async def dependency():
         yield db
     app.dependency_overrides[get_db] = dependency
     app.dependency_overrides[verify_api_key] = lambda: key
     client = TestClient(app)
-    yield SimpleNamespace(client=client, camera=camera, key=key, db=db, job=job, submit=submit, queue=queue,
+    yield SimpleNamespace(client=client, camera=camera, key=key, db=db, job=job, submit=submit, admit_job=admit_job,
                           storage=storage, url=f"/api/v1/cameras/{camera.id}/predict")
     client.close()
     app.dependency_overrides.clear()
@@ -54,9 +55,8 @@ def test_upload_unique_names_and_parameters(setup):
         assert "private" not in kwargs["source_path"] and ".." not in kwargs["source_path"]
         assert setup.storage.exists(kwargs["source_path"])
     assert paths[0] != paths[1]
-    assert setup.queue.call_args.kwargs["queue"] == "prediction"
-    assert setup.queue.call_args.kwargs["retry"] is False
-    assert setup.db.commit.await_count == 2
+    assert setup.admit_job.await_count == 2
+    assert setup.db.commit.await_count == 4
 
 
 @pytest.mark.parametrize(("field", "value"), [("seg_conf", "2"), ("volume_cell_m", "nan"),
@@ -65,7 +65,7 @@ def test_upload_unique_names_and_parameters(setup):
 def test_parameter_validation(setup, field, value):
     response = setup.client.post(setup.url, data={"source_type": "rtsp_frame", field: value})
     assert response.status_code == 422
-    setup.queue.assert_not_called()
+    setup.admit_job.assert_not_called()
 
 
 def test_invalid_image_and_prerequisites_do_not_leave_storage(setup):
@@ -74,7 +74,7 @@ def test_invalid_image_and_prerequisites_do_not_leave_storage(setup):
     response = setup.client.post(setup.url, data={"source_type": "upload"}, files={"file": ("a.jpg", jpeg())})
     assert response.status_code == 409
     assert list(setup.storage.root.rglob("*.image")) == []
-    setup.queue.assert_not_called()
+    setup.admit_job.assert_not_called()
 
 
 def test_rtsp_freshness_and_timestamp_contract(setup):
@@ -89,7 +89,8 @@ def test_rtsp_freshness_and_timestamp_contract(setup):
 
 
 def test_queue_failure_is_safe_and_committed(setup):
-    setup.queue.side_effect = RuntimeError("password@private-host")
+    from fastapi import HTTPException
+    setup.admit_job.side_effect = HTTPException(status_code=503, detail={"code": "runtime_queue_full"})
     response = setup.client.post(setup.url, data={"source_type": "rtsp_frame"})
     assert response.status_code == 503
     assert "password" not in response.text

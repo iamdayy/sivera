@@ -8,7 +8,7 @@ Read `DESIGN.md` before substantial changes. Inspect current source and tests be
 
 ## Stack and repository layout
 
-The project uses Python/FastAPI, Pydantic schemas/settings, SQLAlchemy async, PostgreSQL, Alembic, Redis/Celery components, OpenCV, NumPy/SciPy, segmentation/depth services, and Docker. Confirm actual dependencies and commands in repository files.
+The project uses Python/FastAPI, Pydantic schemas/settings, SQLAlchemy async, PostgreSQL, Alembic, OpenCV, NumPy/SciPy, segmentation/depth services, and Docker. Celery, Redis, and Flower are removed; the FastAPI lifespan owns scheduling and durable-job dispatch under `api/runtime/`. Confirm actual dependencies and commands in repository files.
 
 Important paths:
 - `api/main.py`
@@ -17,7 +17,7 @@ Important paths:
 - `api/schemas/`
 - `api/routes/`
 - `api/services/`
-- `api/workers/`
+- `api/runtime/`
 - `api/alembic/`
 - `api/scripts/export_openapi.py`, `openapi.json`
 - `deploy/mediamtx.yml`, `docker-compose.yml`
@@ -33,7 +33,7 @@ Important paths:
 7. Never expose secrets, stack traces, internal filesystem paths, or RTSP credentials to clients.
 8. When adding a field, update relevant schema, persistence model/migration, service logic, tests, and API documentation.
 9. Verify multipart fields, response models, and status codes in OpenAPI after route changes.
-10. `/`, `/health`, `/docs`, `/redoc`, and `/openapi.json` are public; camera operations and `/files` require `X-API-Key`. OpenAPI must match those dependencies. Missing headers currently return 422, invalid keys 401, insufficient scopes 403.
+10. `/`, `/health`, `/docs`, `/redoc`, and `/openapi.json` are public; operations under `/api/v1/cameras` and `/files` require `X-API-Key`. Public camera playback uses `/api/v1/public/cameras/{camera_id}/stream/whep` without a key. OpenAPI must match those dependencies. Protected operations return 422 for missing headers, 401 for invalid keys, and 403 for insufficient scopes.
 11. Export the reproducible default-settings contract with `python api/scripts/export_openapi.py openapi.json`. The exporter ignores local `.env` and process settings, connects to no services, and contains no deployment credentials. Compare it with `/openapi.json` in a running disposable environment; configuration-dependent defaults can differ at deployment.
 12. Prediction `seg_classes` and `return_outputs` are JSON-array strings inside multipart forms, not repeated fields or a JSON request body. RTSP forbids caller-supplied `file`/`timestamp`; uploads require `file`. Preserve omitted `return_outputs` versus `[]`.
 
@@ -41,9 +41,9 @@ Important paths:
 
 - Prediction pins compatible IDs: active calibration, latest ground model linked to an active reference for that calibration, and active depth scale for that ground model. Public depth-scale creation, reads, activation, test-image upload, and authenticated undistorted previews are available under the ground model. Creation uses at least three camera-axis Z measurements and auto-activates only accepted fits. The first prediction can still be blocked without a compatible scale; prediction never creates it. Fit success is not physical metric certification.
 - Depth-scale creation is synchronous 201, not a queued 202 job. It uses a killable CPU inference subprocess with a configurable timeout and one creation inference per API process; busy/timeouts return safe 503 codes. Keep raw-image undistort-before-inference consistent with prediction. `/files` is not an upload endpoint. Use source keys from test-image upload or registered calibration images; never accept arbitrary filesystem paths/URLs or fabricate measurements.
-- `upload`, `rtsp_frame`, and `latest_rtsp` are implemented and queued. The API commits a pending job before dispatch to queue `prediction`, returns 202 with `job_id`, and workers persist `processing -> done/failed`. `estimated_duration_sec=30` is a fixed advisory value, not measured progress or an SLA.
-- `rtsp_frame` captures when the worker executes. `latest_rtsp` reselects a fresh persisted snapshot at execution and never captures a fallback. Both require an enabled stream and original calibration intrinsics/dimensions. Timestamps record worker reception, not sensor time.
-- Capture/compute use persistent outboxes with bounded redispatch; prediction does not. Broker failure returns 503 and marks the prediction failed; stale jobs fail without automatic resume. Keep task claims and completion fences intact.
+- `upload`, `rtsp_frame`, and `latest_rtsp` are implemented and queued. The API commits a pending job before runtime dispatch, returns 202 with `job_id`, and the runtime runner persists `processing -> done/failed`. `estimated_duration_sec=30` is a fixed advisory value, not measured progress or an SLA.
+- `rtsp_frame` captures when the runtime runner executes. `latest_rtsp` reselects a fresh persisted snapshot at execution and never captures a fallback. Both require an enabled stream and original calibration intrinsics/dimensions. Timestamps record runtime reception, not sensor time.
+- Capture/compute use persistent outboxes with bounded redispatch; prediction does not. Queue-full returns 503 and marks the prediction failed; stale jobs fail without automatic resume. Keep task claims and completion fences intact.
 - Capture and computation have separate statuses. New sessions target accepted frames (`selection_version=1`), retain rejected frames, and store at most 300. Legacy sessions target stored frames (`selection_version=0`). `completed` means the capture target was reached, not successful calibration.
 - Capture compute creates inactive calibration and requires explicit activation. Legacy multipart upload calibration remains synchronous and auto-activates. Do not silently unify these behaviors.
 - The MediaMTX image is fixed at `bluenviron/mediamtx:1.20.0-ffmpeg`; use `deploy/mediamtx.yml`, not an unrelated root `mediamtx.yml`. Do not source-build or change its version without approval. WHEP signaling success does not prove browser video/ICE works.
@@ -73,7 +73,7 @@ Important paths:
 - Enforce upload size limits and avoid unbounded memory use for large images.
 - Never commit real `.env` values, API keys, credentials, model secrets, or camera RTSP credentials.
 - Migration head is `007_preview_artifacts`: 006 adds nullable depth model identity/provenance; 007 registers previews against exactly one calibration/ground model. Legacy scales need a new fit and unregistered previews need regeneration. `create_all` at startup does not upgrade existing tables. A database without Alembic history requires a schema/baseline audit; never blindly `stamp head` or reset it. The authorized local reset on 22 October 2026 was a one-off operation, not permission to repeat it.
-- API and all workers share one writable storage root/private bucket. Compose defines separate `capture`, `calibration`, and `prediction` queues; prediction also drains legacy `celery`. Per-task async engines use NullPool to avoid cross-fork/event-loop pooled connections.
+- API and all runtime jobs share one writable storage root/private bucket. The FastAPI runtime owns capture, calibration, prediction, and automatic queues from PostgreSQL rows. Per-task async engines use NullPool to avoid cross-fork/event-loop pooled connections.
 - Artifact files survive database/camera deletion and can become orphaned after interrupted writes. Retention and physical cleanup are operator tasks. Never silently delete files while migrating metadata.
 - Calibration undistort previews are cached only when both the file and its `PreviewArtifact` registration exist. The preview endpoint regenerates unregistered legacy files from the calibration source and commits registration before returning the URL; serialize generation under the calibration row lock. Keep `/files` registration and scope checks intact.
 
@@ -85,8 +85,9 @@ Important paths:
 - Use least-privilege scopes and preserve key hashing behavior unless deliberately migrating it.
 - Keep safe defaults and document required environment settings in `.env.example`.
 - Do not accidentally commit generated data, private images, model weights, or secrets.
-- All API/workers must share one stable non-default `SECRET_KEY`, used for database key hashes, WHEP ownership, and RTSP source HMAC. Rotation invalidates old identities and key hashes unless deliberately migrated.
-- WHEP OPTIONS/POST/PATCH/DELETE require `camera:read`; PATCH/DELETE also require the same owning key. Use the rewritten backend `Location`, never internal MediaMTX URLs. Do not automatically retry offer POST. ICE/media reachability and codec compatibility need browser testing.
+- API and all runtime jobs must share one stable non-default `SECRET_KEY`, used for database key hashes, WHEP ownership, and RTSP source HMAC. Rotation invalidates old identities and key hashes unless deliberately migrated.
+- WHEP under `/api/v1/cameras/{camera_id}` requires `camera:read`; PATCH/DELETE also require the same owning key. Use the rewritten backend `Location`, never internal MediaMTX URLs. Do not automatically retry offer POST. ICE/media reachability and codec compatibility need browser testing.
+- Public WHEP under `/api/v1/public/cameras/{camera_id}` uses no API key. OPTIONS is a 204 capabilities request; CORS preflight is handled separately by middleware. POST returns 201 SDP and a validated backend Location; DELETE normalizes MediaMTX 200/204/404 to bodyless 204. The public Location contains the upstream session UUID, without a `StreamSession` ownership mapping; keep it out of logs. Reuse the bounded MediaMTX service and backend CORS policy.
 - Per the user's 26 October 2026 decision, accept every RTSP/RTSPS hostname/IP; `MEDIAMTX_ALLOWED_RTSP_HOSTS` is unused. Preserve URL scheme/port/fragment validation, authentication, scopes, and camera binding. MediaMTX admin/reader credentials are distinct and never sent to the dashboard. Authenticated image previews need header-bearing fetch/blob URLs; do not put API keys in query strings.
 - Database keys expire at `expires_at <= now` in UTC; configured wildcard keys have no database expiry. Ground-reference/model/depth-scale routers enforce camera-bound keys. `/files` requires a registered domain resource and its read scope, including preview registration; unknown namespaces and orphan files are denied. This remains a single-organization API, not a tenant-isolation guarantee.
 
@@ -112,7 +113,7 @@ As relevant:
 - verify `/health` and `/openapi.json` in a running test environment.
 - verify WHEP SDP/ICE content types, Location/ETag/If-Match, ownership, and session cleanup;
 - test accepted/rejected selection, source/resolution changes, capture stop/deadline/crash, compute idempotency/inactive result, snapshots/freshness, prediction queue claims, selected outputs, and missing estimates;
-- run migration upgrade/downgrade only against disposable databases. Integration tests can mutate schema/paths and kill a worker child when explicitly enabled; never point their environment variables at user services.
+- run migration upgrade/downgrade only against disposable databases. Integration tests can mutate schema/paths and kill a runtime subprocess when explicitly enabled; never point their environment variables at user services.
 
 Do not claim tests passed unless they were run. If GPU, model weights, or external services are unavailable, state which integration tests could not run.
 
@@ -161,7 +162,7 @@ Implementation as of 26 October 2026: depth creation accepts optional `test_imag
 
 ### Asynchronous job correctness
 
-- Preserve persisted job transitions and completion fencing. Add/retain tests for duplicate task delivery, worker exception, queue/broker failure, stale job timeout, retry behavior, and late worker completion after a job has become terminal. A late worker must not overwrite a terminal status or publish partial artifacts as complete.
+- Preserve persisted job transitions and completion fencing. Add/retain tests for duplicate task delivery, runner exception, queue failure, stale job timeout, retry behavior, and late runner completion after a job has become terminal. A late runner must not overwrite a terminal status or publish partial artifacts as complete.
 - Keep capture, calibration computation, and prediction states separate where they represent different work. Do not infer percentage progress or measured duration from a fixed advisory duration.
 - Verify artifacts and database outputs are committed consistently; failed jobs should expose stable safe error codes and should not leave result records that appear successful.
 

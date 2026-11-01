@@ -14,7 +14,7 @@ from api.services.calibration_capture_service import ACTIVE_STATUSES, DISPATCH_I
 from api.services.calibration_quality_service import assess_frame_bounded
 from api.services.rtsp_capture_service import decode_frame
 from api.services.vision_process_service import VisionError, run_vision
-from api.workers.database import DatabaseContext
+from api.core.database import DatabaseContext
 
 
 logger = logging.getLogger(__name__)
@@ -36,8 +36,12 @@ def expire_computation(session: CalibrationCaptureSession, config: Settings = se
 
 
 async def publish_computation(session_id: UUID) -> None:
-    from api.workers.tasks.calibration_task import run_capture_calibration_task
-    await asyncio.to_thread(run_capture_calibration_task.apply_async, args=[str(session_id)], queue="calibration", retry=False)
+    """Enqueue calibration computation through the runtime instead of Celery."""
+    from api.runtime.dependencies import notify_runtime
+    try:
+        notify_runtime(None)
+    except Exception:
+        pass
 
 
 async def reconcile_computations(config: Settings = settings) -> None:

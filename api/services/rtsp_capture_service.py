@@ -59,8 +59,22 @@ async def check_relay_source(camera_id: UUID, source: str, config: Settings = se
     relay = MediaMTXService(config)
     try:
         current = await relay.get_path_config(stream_path(camera_id))
-        if current is None or any(current.get(key) != value for key, value in desired_path(source).items()):
+        wanted = desired_path(source)
+        if current is None:
             raise CaptureError("capture_stream_sync_pending")
+        # Compare critical fields, allowing MediaMTX to add extra fields to alwaysAvailableTracks
+        for key, value in wanted.items():
+            if key == "alwaysAvailableTracks":
+                # Compare track codec only, ignore extra fields MediaMTX adds
+                current_tracks = current.get(key, [])
+                wanted_tracks = value
+                if not current_tracks or len(current_tracks) != len(wanted_tracks):
+                    raise CaptureError("capture_stream_sync_pending")
+                for c, w in zip(current_tracks, wanted_tracks):
+                    if c.get("codec") != w.get("codec"):
+                        raise CaptureError("capture_stream_sync_pending")
+            elif current.get(key) != value:
+                raise CaptureError("capture_stream_sync_pending")
     except MediaMTXError as exc:
         raise CaptureError(exc.code) from None
     finally:
@@ -71,7 +85,7 @@ async def capture_frame(camera_id: UUID, config: Settings = settings) -> Capture
     url = relay_url(camera_id, config)
     try:
         process = await asyncio.create_subprocess_exec(
-            # This timer outlives a killed Celery child; Python's timeout alone does not.
+            # This timer survives an abrupt API process death.
             "timeout", "--signal=KILL", str(config.STREAM_CAPTURE_TIMEOUT),
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
             "-max_alloc", "134217728", "-rtsp_transport", "tcp",

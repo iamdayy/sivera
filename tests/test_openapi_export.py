@@ -63,5 +63,5 @@ def test_published_contract_references_and_operation_ids():
     operation_ids = [operation["operationId"] for path in contract["paths"].values()
                      for operation in path.values() if isinstance(operation, dict) and "operationId" in operation]
     assert len(operation_ids) == len(set(operation_ids))
-    assert all(path in {"/", "/health", "/files/{path}"} or path.startswith("/api/v1/cameras")
+    assert all(path in {"/", "/health", "/openapi.json", "/docs", "/redoc", "/files/{path}"} or path.startswith(("/api/v1/cameras", "/api/v1/public"))
                for path in contract["paths"])

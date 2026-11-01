@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Waste Volume Estimation API",
-    "description": "## Waste Volume Estimation API\n\nCamera operations are mounted at `/api/v1/cameras`; `/files` serves protected artifacts.\n\n- WebRTC playback uses backend-authenticated WHEP signaling; media flows directly from MediaMTX.\n- RTSP calibration capture selects chessboard frames and queues computation. Computed calibrations are inactive until explicitly activated; multipart calibration upload is synchronous and activates its result.\n- Snapshots preserve original resolution and record worker-reception UTC time, not sensor time.\n- Predictions queue `upload`, `rtsp_frame`, or `latest_rtsp` and persist `pending -> processing -> done/failed`. HTTP 202 acknowledges submission, not completion.\n- Grid volume sums cell median heights times cell area. `convex_hull` means 2D footprint-hull area times median height, not a 3D hull. Volume is m³/L, footprint m², height meters; missing estimates remain null. BEV is a visualization, not a complete 3D reconstruction.\n\n### Authentication\nCamera operations and artifact downloads require `X-API-Key`. `/`, `/health`, `/docs`, `/redoc`, and `/openapi.json` are public. Keys are configured through `VALID_API_KEYS` or stored hashed in PostgreSQL. Environment-configured keys have wildcard scopes and must not be embedded in browser builds. Missing headers currently return 422; invalid keys return 401 and insufficient scopes return 403.\n\n### Scopes\n- `camera:read` / `camera:write` - Camera management\n- `calibration:read` / `calibration:write` - Calibration\n- `ground_ref:read` / `ground_ref:write` - Ground references\n- `predict:read` / `predict:write` - Predictions\n\n### Prediction prerequisites and coordinates\nSubmission pins an active calibration, a ground model linked to an active reference for that calibration, and an active depth scale for that ground model. Depth scales can be created and inspected under the selected ground model; active scales must match the installed depth weights and preprocessing. New calibrations preserve `k_original`, `k_undist`, and dimensions; `k_matrix` remains the undistorted K. Upload raw images for these calibrations. Legacy uploads without original intrinsics require already-undistorted images; RTSP requires recalibration. Ground-reference image points use undistorted coordinates.\n\n### RTSP sources and output selection\n`rtsp_frame` captures at worker execution. `latest_rtsp` requires a fresh persisted snapshot at submission and selects again at execution, without fallback capture. RTSP rejects caller files/timestamps; frame dimensions must exactly match calibration. `return_outputs` is a JSON-array form string: omitted registers all supported outputs, `[]` registers none. Internal files may still be generated; summary/instances/volumes are not filtered. Broker failure returns 503 and marks the job failed; predictions are not automatically redispatched.\n\n### Errors and deployment limits\nErrors use `detail` as a string, an object with a safe `code`, or a validation list. Handle all shapes. Browser video/ICE/reconnect, real-camera accuracy, model/GPU inference, TLS/TURN, and dashboard integration still require deployment testing. Legacy ground-reference/model routes do not yet enforce camera-bound API-key restrictions; do not treat them as tenant-isolated.",
+    "description": "## Waste Volume Estimation API\n\nCamera operations are mounted at `/api/v1/cameras`; `/files` serves protected artifacts.\n\n- WebRTC playback uses backend WHEP signaling; media flows directly from MediaMTX. Public camera playback is available under `/api/v1/public/cameras/{camera_id}/stream/whep` without an API key.\n- RTSP calibration capture selects chessboard frames and queues computation. Computed calibrations are inactive until explicitly activated; multipart calibration upload is synchronous and activates its result.\n- Snapshots preserve original resolution and record worker-reception UTC time, not sensor time.\n- Predictions queue `upload`, `rtsp_frame`, or `latest_rtsp` and persist `pending -> processing -> done/failed`. HTTP 202 acknowledges submission, not completion.\n- Grid volume sums cell median heights times cell area. `convex_hull` means 2D footprint-hull area times median height, not a 3D hull. Volume is m³/L, footprint m², height meters; missing estimates remain null. BEV is a visualization, not a complete 3D reconstruction.\n\n### Authentication\nOperations under `/api/v1/cameras` and `/files` downloads require `X-API-Key`. `/`, `/health`, `/docs`, `/redoc`, and `/openapi.json` are public. Keys are configured through `VALID_API_KEYS` or stored hashed in PostgreSQL. Environment-configured keys have wildcard scopes and must not be embedded in browser builds. Missing headers currently return 422; invalid keys return 401 and insufficient scopes return 403.\n\n### Scopes\n- `camera:read` / `camera:write` - Camera management\n- `calibration:read` / `calibration:write` - Calibration\n- `ground_ref:read` / `ground_ref:write` - Ground references\n- `predict:read` / `predict:write` - Predictions\n\n### Prediction prerequisites and coordinates\nSubmission pins an active calibration, a ground model linked to an active reference for that calibration, and an active depth scale for that ground model. Depth scales can be created and inspected under the selected ground model; active scales must match the installed depth weights and preprocessing. New calibrations preserve `k_original`, `k_undist`, and dimensions; `k_matrix` remains the undistorted K. Upload raw images for these calibrations. Legacy uploads without original intrinsics require already-undistorted images; RTSP requires recalibration. Ground-reference image points use undistorted coordinates.\n\n### RTSP sources and output selection\n`rtsp_frame` captures at worker execution. `latest_rtsp` requires a fresh persisted snapshot at submission and selects again at execution, without fallback capture. RTSP rejects caller files/timestamps; frame dimensions must exactly match calibration. `return_outputs` is a JSON-array form string: omitted registers all supported outputs, `[]` registers none. Internal files may still be generated; summary/instances/volumes are not filtered. Broker failure returns 503 and marks the job failed; predictions are not automatically redispatched.\n\n### Errors and deployment limits\nErrors use `detail` as a string, an object with a safe `code`, or a validation list. Handle all shapes. Browser video/ICE/reconnect, real-camera accuracy, model/GPU inference, TLS/TURN, and dashboard integration still require deployment testing. Legacy ground-reference/model routes do not yet enforce camera-bound API-key restrictions; do not treat them as tenant-isolated.",
     "version": "1.0.0"
   },
   "paths": {
@@ -350,6 +350,120 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/auto-predict": {
+      "get": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "Get Auto Predict Config",
+        "description": "Get auto-prediction configuration for a camera.",
+        "operationId": "get_auto_predict_config_api_v1_cameras__camera_id__auto_predict_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "cameras"
+        ],
+        "summary": "Update Auto Predict Config",
+        "description": "Update auto-prediction configuration for a camera.\n\nOnly rtsp_frame source_type is supported for automatic inference. The\nruntime picks up the updated schedule on its next poll.",
+        "operationId": "update_auto_predict_config_api_v1_cameras__camera_id__auto_predict_patch",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutoPredictConfigUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -1925,7 +2039,7 @@
           "ground-references"
         ],
         "summary": "Create Ground Reference",
-        "description": "Submit ground reference points (image <-> world correspondences).\n\nThis computes the ground model (homography + camera pose) automatically.",
+        "description": "Create and activate a reference and its ground model atomically (201).\n\nSource-bound points are validated against the exact frozen image and active\ncalibration under a camera lock. This operation is not a queued job or an\nidempotent write; check history after an ambiguous transport failure.",
         "operationId": "create_ground_reference_api_v1_cameras__camera_id__ground_references_post",
         "parameters": [
           {
@@ -1959,6 +2073,18 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid point pairs, units, geometry or out-of-bounds pixels"
+          },
+          "404": {
+            "description": "Camera or source missing"
+          },
+          "409": {
+            "description": "Active calibration, RTSP source or dimensions changed"
+          },
+          "503": {
+            "description": "Persistence unavailable; check reference history before retrying"
           },
           "422": {
             "description": "Validation Error",
@@ -2157,13 +2283,78 @@
         ]
       }
     },
+    "/api/v1/cameras/{camera_id}/ground-references/{ground_ref_id}/ground-model": {
+      "get": {
+        "tags": [
+          "ground-references"
+        ],
+        "summary": "Get Reference Ground Model",
+        "description": "Read the saved model for this reference, including inactive history.",
+        "operationId": "get_reference_ground_model_api_v1_cameras__camera_id__ground_references__ground_ref_id__ground_model_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_ref_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Ref Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundModelResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/cameras/{camera_id}/ground-references/{ground_ref_id}/activate": {
       "post": {
         "tags": [
           "ground-references"
         ],
         "summary": "Activate Ground Reference",
-        "description": "Set a ground reference version as active (deactivates others).",
+        "description": "Activate with the original calibration, retaining saved models and pinned jobs.",
         "operationId": "activate_ground_reference_api_v1_cameras__camera_id__ground_references__ground_ref_id__activate_post",
         "parameters": [
           {
@@ -2197,6 +2388,240 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Activate the reference's original calibration first; a changed RTSP source requires a new reference"
+          },
+          "503": {
+            "description": "Activation persistence unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-reference-sources": {
+      "post": {
+        "tags": [
+          "ground-reference-sources"
+        ],
+        "summary": "Create Ground Reference Source",
+        "description": "Freeze an original RTSP snapshot in undistorted pixels using the active calibration.\n\nRequires ground_ref:write, camera:read and calibration:read. Image bytes and provenance\ncommit before the response. Repeating the same preparation is idempotent.",
+        "operationId": "create_ground_reference_source_api_v1_cameras__camera_id__ground_reference_sources_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroundReferenceSourceCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundReferenceSourceResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Same snapshot/calibration/preparation reused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundReferenceSourceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid/oversized source image or intrinsics"
+          },
+          "404": {
+            "description": "Camera, snapshot or source image missing"
+          },
+          "409": {
+            "description": "Active calibration, RTSP source or dimensions changed; acquire a new source"
+          },
+          "503": {
+            "description": "Source image preparation, storage or persistence unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-reference-sources/{source_id}": {
+      "get": {
+        "tags": [
+          "ground-reference-sources"
+        ],
+        "summary": "Get Ground Reference Source",
+        "operationId": "get_ground_reference_source_api_v1_cameras__camera_id__ground_reference_sources__source_id__get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Source Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroundReferenceSourceResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Source not found for camera"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-reference-sources/{source_id}/image": {
+      "get": {
+        "tags": [
+          "ground-reference-sources"
+        ],
+        "summary": "Download Ground Reference Source",
+        "operationId": "download_ground_reference_source_api_v1_cameras__camera_id__ground_reference_sources__source_id__image_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "source_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Source Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Source or registered image missing"
+          },
+          "409": {
+            "description": "Stored source image failed integrity check"
+          },
+          "503": {
+            "description": "Image storage unavailable"
           },
           "422": {
             "description": "Validation Error",
@@ -2384,10 +2809,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Relative camera-owned source storage key; defaults to a registered calibration image. Input follows prediction's raw/legacy image contract.",
+              "description": "Optional raw camera-owned source key. Default uses the reference's frozen PNG, or a calibration image for legacy references.",
               "title": "Test Image Path"
             },
-            "description": "Relative camera-owned source storage key; defaults to a registered calibration image. Input follows prediction's raw/legacy image contract."
+            "description": "Optional raw camera-owned source key. Default uses the reference's frozen PNG, or a calibration image for legacy references."
           },
           {
             "name": "mask_path",
@@ -2610,13 +3035,256 @@
         ]
       }
     },
+    "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales/preview": {
+      "post": {
+        "tags": [
+          "depth-scales"
+        ],
+        "summary": "Create Depth Scale Preview",
+        "description": "Run YOLO depth inference on test image and return depth visualization.\n\nReturns a temporary depth_image_id and depth visualization URL.\nThe raw depth array is stored temporarily (TTL ~10 min) for the subsequent create step.",
+        "operationId": "create_depth_scale_preview_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_preview_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DepthScalePreviewCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DepthScalePreviewResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid image or model"
+          },
+          "404": {
+            "description": "Camera, ground model, or calibration missing"
+          },
+          "409": {
+            "description": "Ground model is not compatible with active calibration/reference"
+          },
+          "503": {
+            "description": "Model, storage, or inference unavailable/busy/timed out"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales/preview/{depth_image_id}/image": {
+      "get": {
+        "tags": [
+          "depth-scales"
+        ],
+        "summary": "Download Depth Preview Image",
+        "description": "Get depth preview visualization PNG.",
+        "operationId": "download_depth_preview_image_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_preview__depth_image_id__image_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          },
+          {
+            "name": "depth_image_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Depth Image Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Preview image not found or expired"
+          },
+          "503": {
+            "description": "Image storage unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales/preview/{depth_image_id}": {
+      "delete": {
+        "tags": [
+          "depth-scales"
+        ],
+        "summary": "Delete Depth Preview Endpoint",
+        "description": "Delete depth preview data (cleanup).",
+        "operationId": "delete_depth_preview_endpoint_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_preview__depth_image_id__delete",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "ground_model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Ground Model Id"
+            }
+          },
+          {
+            "name": "depth_image_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Depth Image Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Preview not found"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or inactive API key"
+          },
+          "403": {
+            "description": "Required scope or camera access denied"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/cameras/{camera_id}/ground-models/{ground_model_id}/depth-scales": {
       "post": {
         "tags": [
           "depth-scales"
         ],
         "summary": "Create Depth Scale",
-        "description": "Synchronously fit and auto-activate a depth correction (201), not a queued prediction.\n\nRequires ground_ref:write and camera access. Points use the undistorted preview;\ndistance_m is camera-axis Z. Fit gates are heuristics, not metric certification.\nRejected computations leave the previous active scale unchanged.\n\nOnly `known_distances` (min 3 points) is required.\n`test_image` defaults to first calibration image.\n`depth_model` defaults to DEFAULT_DEPTH_MODEL.\n`clip_min_m`/`clip_max_m` default to 0.1m / 50m.",
+        "description": "Synchronously fit and auto-activate a depth correction (201), not a queued prediction.\n\nRequires ground_ref:write and camera access. Points use the undistorted preview;\ndistance_m is camera-axis Z. Fit gates are heuristics, not metric certification.\nRejected computations leave the previous active scale unchanged.\n\nTwo modes:\n1. Legacy: Provide `test_image` (or default) + `known_distances` — runs YOLO + fits in one call\n2. Two-step: Provide `depth_image_id` (from /preview) + `known_distances` — uses stored depth from preview\n\nOnly `known_distances` (min 3 points) is required.\n`test_image` defaults to first calibration image.\n`depth_model` defaults to DEFAULT_DEPTH_MODEL.\n`clip_min_m`/`clip_max_m` default to 0.1m / 50m.",
         "operationId": "create_depth_scale_api_v1_cameras__camera_id__ground_models__ground_model_id__depth_scales_post",
         "parameters": [
           {
@@ -3523,6 +4191,533 @@
         ]
       }
     },
+    "/api/v1/public/cameras/{camera_id}/latest-prediction": {
+      "get": {
+        "tags": [
+          "public-predictions"
+        ],
+        "summary": "Get Latest Prediction",
+        "description": "Get the latest prediction for a camera from database.\n\nNo Redis cache - reads directly from DB.\nNo API key required for public access.",
+        "operationId": "get_latest_prediction_api_v1_public_cameras__camera_id__latest_prediction_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/public/cameras/{camera_id}/latest-prediction/outputs/{output_type}/image": {
+      "get": {
+        "tags": [
+          "public-predictions"
+        ],
+        "summary": "Get Latest Prediction Output Image",
+        "description": "Get the latest prediction output image (streamed).\n\nPublic endpoint with no-store cache headers.",
+        "operationId": "get_latest_prediction_output_image_api_v1_public_cameras__camera_id__latest_prediction_outputs__output_type__image_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "output_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Output Type"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/public/cameras/{camera_id}/predictions": {
+      "get": {
+        "tags": [
+          "public-predictions"
+        ],
+        "summary": "List Public Predictions",
+        "description": "List prediction jobs for a camera (public, paginated).",
+        "operationId": "list_public_predictions_api_v1_public_cameras__camera_id__predictions_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PredictionJobListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/public/cameras/{camera_id}/predictions/stream": {
+      "get": {
+        "tags": [
+          "public-predictions"
+        ],
+        "summary": "Stream Prediction Updates",
+        "description": "Server-Sent Events (SSE) stream for live prediction updates.\n\nSubscribes to the in-process event hub and forwards events.\nNo authentication required for public access.",
+        "operationId": "stream_prediction_updates_api_v1_public_cameras__camera_id__predictions_stream_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/public/cameras/{camera_id}/stream/whep": {
+      "options": {
+        "tags": [
+          "public-stream"
+        ],
+        "summary": "Whep Options",
+        "description": "Read capabilities from MediaMTX without an API key.",
+        "operationId": "whep_options_api_v1_public_cameras__camera_id__stream_whep_options",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Public WHEP capabilities (not a CORS preflight)",
+            "headers": {
+              "Accept-Post": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Accept-Patch": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Link": {
+                "description": "ICE server links when returned by MediaMTX",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      },
+      "get": {
+        "tags": [
+          "public-stream"
+        ],
+        "summary": "Whep Get Offer",
+        "description": "Forward legacy GET requests; players establish sessions with POST.",
+        "operationId": "whep_get_offer_api_v1_public_cameras__camera_id__stream_whep_get",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      },
+      "post": {
+        "tags": [
+          "public-stream"
+        ],
+        "summary": "Whep Post Answer",
+        "description": "Send the browser's SDP offer and return MediaMTX's answer.",
+        "operationId": "whep_post_answer_api_v1_public_cameras__camera_id__stream_whep_post",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "SDP answer and public backend session Location; do not retry offer POST automatically",
+            "content": {
+              "application/sdp": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "Location": {
+                "description": "Backend URL for public PATCH/DELETE",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Link": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/sdp": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/public/cameras/{camera_id}/stream/whep/{session_id}": {
+      "patch": {
+        "tags": [
+          "public-stream"
+        ],
+        "summary": "Whep Patch Session",
+        "description": "WHEP PATCH: ICE restart or session update.\n\nNo API key required. Camera must have stream_enabled=true.",
+        "operationId": "whep_patch_session_api_v1_public_cameras__camera_id__stream_whep__session_id__patch",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "description": "ETag from the WHEP answer",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "ICE fragment accepted",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "ICE restart answer",
+            "content": {
+              "application/trickle-ice-sdpfrag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/trickle-ice-sdpfrag": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "security": []
+      },
+      "delete": {
+        "tags": [
+          "public-stream"
+        ],
+        "summary": "Whep Delete Session",
+        "description": "WHEP DELETE: terminate WebRTC session.\n\nNo API key required. Camera must have stream_enabled=true.",
+        "operationId": "whep_delete_session_api_v1_public_cameras__camera_id__stream_whep__session_id__delete",
+        "parameters": [
+          {
+            "name": "camera_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Camera Id"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/health": {
       "get": {
         "summary": "Health Check",
@@ -3540,7 +4735,8 @@
             }
           }
         },
-        "security": []
+        "security": [],
+        "parameters": []
       }
     },
     "/": {
@@ -3560,12 +4756,113 @@
             }
           }
         },
-        "security": []
+        "security": [],
+        "parameters": []
       }
     }
   },
   "components": {
     "schemas": {
+      "AutoPredictConfigUpdate": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "default": false
+          },
+          "interval_sec": {
+            "type": "integer",
+            "maximum": 3600.0,
+            "minimum": 5.0,
+            "title": "Interval Sec",
+            "default": 30
+          },
+          "source_type": {
+            "type": "string",
+            "enum": [
+              "rtsp_frame"
+            ],
+            "const": "rtsp_frame",
+            "title": "Source Type",
+            "default": "rtsp_frame"
+          },
+          "seg_model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seg Model",
+            "default": "yolo26n-seg.pt"
+          },
+          "seg_conf": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Seg Conf",
+            "default": 0.25
+          },
+          "seg_classes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seg Classes"
+          },
+          "volume_cell_m": {
+            "type": "number",
+            "maximum": 1.0,
+            "exclusiveMinimum": 0.0,
+            "title": "Volume Cell M",
+            "default": 0.05
+          },
+          "volume_min_pts_per_cell": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Volume Min Pts Per Cell",
+            "default": 2
+          },
+          "return_outputs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 13
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return Outputs"
+          },
+          "max_frame_age_sec": {
+            "type": "integer",
+            "maximum": 300.0,
+            "minimum": 1.0,
+            "title": "Max Frame Age Sec",
+            "default": 10
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AutoPredictConfigUpdate",
+        "description": "Only explicitly supplied fields are merged into the saved configuration."
+      },
       "BEVPreviewResponse": {
         "properties": {
           "bev_image_url": {
@@ -3573,7 +4870,14 @@
             "title": "Bev Image Url"
           },
           "bev_mask_url": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Bev Mask Url"
           },
           "bev_overlay_url": {
@@ -3583,12 +4887,30 @@
           "bev_info": {
             "type": "object",
             "title": "Bev Info"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id",
+            "description": "Bound reference source used by this preview, if any"
+          },
+          "has_mask": {
+            "type": "boolean",
+            "title": "Has Mask",
+            "description": "True only when a real mask was supplied; no synthetic segmentation",
+            "default": false
           }
         },
         "type": "object",
         "required": [
           "bev_image_url",
-          "bev_mask_url",
           "bev_overlay_url",
           "bev_info"
         ],
@@ -3654,27 +4976,46 @@
         "properties": {
           "image_points": {
             "type": "string",
-            "title": "Image Points"
+            "maxLength": 32768,
+            "title": "Image Points",
+            "description": "JSON array of 4..100 undistorted [u,v] pixel pairs"
           },
           "world_points": {
             "type": "string",
-            "title": "World Points"
+            "maxLength": 32768,
+            "title": "World Points",
+            "description": "JSON array of corresponding [X,Y] pairs in meters"
           },
           "world_units": {
             "type": "string",
+            "pattern": "^(meter|metre)$",
             "title": "World Units",
             "default": "meter"
           },
           "description": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 2000
               },
               {
                 "type": "null"
               }
             ],
             "title": "Description"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id",
+            "description": "Prepared snapshot source; omitted retains legacy undistorted-point input"
           }
         },
         "type": "object",
@@ -5175,6 +6516,19 @@
       },
       "DepthScaleCreate": {
         "properties": {
+          "depth_image_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Depth Image Id",
+            "description": "Temporary ID from /preview step; if provided, test_image is ignored"
+          },
           "test_image": {
             "anyOf": [
               {
@@ -5224,7 +6578,7 @@
           "known_distances"
         ],
         "title": "DepthScaleCreate",
-        "description": "Fit an additional linear correction to model depth using camera-axis Z measurements.\n\nOnly `known_distances` (min 3 points on undistorted preview) is required.\n`test_image` defaults to first calibration image.\n`depth_model` defaults to DEFAULT_DEPTH_MODEL.\n`clip_min_m`/`clip_max_m` default to 0.1m / 50m."
+        "description": "Fit an additional linear correction to model depth using camera-axis Z measurements.\n\nOnly `known_distances` (min 3 points on undistorted preview) is required.\nTwo modes:\n1. Legacy: Provide `test_image` (or default) + `known_distances` — runs YOLO + fits in one call\n2. Two-step: Provide `depth_image_id` (from /preview) + `known_distances` — uses stored depth from preview\n\n`test_image` defaults to first calibration image (legacy mode).\n`depth_model` defaults to DEFAULT_DEPTH_MODEL.\n`clip_min_m`/`clip_max_m` default to 0.1m / 50m."
       },
       "DepthScaleImageResponse": {
         "properties": {
@@ -5300,6 +6654,82 @@
           "total"
         ],
         "title": "DepthScaleListResponse"
+      },
+      "DepthScalePreviewCreate": {
+        "properties": {
+          "test_image": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1024,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Test Image",
+            "description": "Source key returned by test-image upload or registered in this calibration; omitted uses its first image"
+          },
+          "depth_model": {
+            "type": "string",
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*\\.pt$",
+            "title": "Depth Model"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "DepthScalePreviewCreate",
+        "description": "Run YOLO depth inference on a test image and return depth visualization.\n\n`test_image` defaults to first calibration image.\n`depth_model` defaults to DEFAULT_DEPTH_MODEL."
+      },
+      "DepthScalePreviewResponse": {
+        "properties": {
+          "depth_image_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Depth Image Id",
+            "description": "Temporary ID to reference the computed depth array in the create step"
+          },
+          "depth_visualization_url": {
+            "type": "string",
+            "title": "Depth Visualization Url",
+            "description": "Authenticated depth colormap PNG; fetch with X-API-Key"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height"
+          },
+          "depth_stats": {
+            "type": "object",
+            "title": "Depth Stats",
+            "description": "Raw depth statistics: min, max, mean"
+          },
+          "model_used": {
+            "type": "string",
+            "title": "Model Used"
+          },
+          "imgsz": {
+            "type": "integer",
+            "title": "Imgsz"
+          }
+        },
+        "type": "object",
+        "required": [
+          "depth_image_id",
+          "depth_visualization_url",
+          "width",
+          "height",
+          "depth_stats",
+          "model_used",
+          "imgsz"
+        ],
+        "title": "DepthScalePreviewResponse",
+        "description": "Response from depth preview endpoint."
       },
       "DepthScaleResponse": {
         "properties": {
@@ -5696,6 +7126,19 @@
             "format": "uuid",
             "title": "Calibration Id"
           },
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id",
+            "description": "Persisted camera source; null for legacy references"
+          },
           "version": {
             "type": "integer",
             "title": "Version"
@@ -5759,6 +7202,92 @@
           "created_at"
         ],
         "title": "GroundReferenceResponse"
+      },
+      "GroundReferenceSourceCreate": {
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Snapshot Id"
+          },
+          "calibration_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Calibration Id",
+            "description": "Active calibration that will undistort this snapshot"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "snapshot_id",
+          "calibration_id"
+        ],
+        "title": "GroundReferenceSourceCreate"
+      },
+      "GroundReferenceSourceResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "camera_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Camera Id"
+          },
+          "snapshot_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Snapshot Id"
+          },
+          "calibration_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Calibration Id"
+          },
+          "captured_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Captured At",
+            "description": "Snapshot reception time, not sensor time"
+          },
+          "width": {
+            "type": "integer",
+            "title": "Width"
+          },
+          "height": {
+            "type": "integer",
+            "title": "Height"
+          },
+          "coordinate_system": {
+            "type": "string",
+            "enum": [
+              "undistorted_pixels"
+            ],
+            "const": "undistorted_pixels",
+            "title": "Coordinate System",
+            "default": "undistorted_pixels"
+          },
+          "image_url": {
+            "type": "string",
+            "title": "Image Url",
+            "description": "Authenticated, persisted undistorted PNG; fetch with X-API-Key"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "camera_id",
+          "snapshot_id",
+          "calibration_id",
+          "captured_at",
+          "width",
+          "height",
+          "image_url"
+        ],
+        "title": "GroundReferenceSourceResponse"
       },
       "HTTPValidationError": {
         "properties": {
@@ -6509,6 +8038,10 @@
     {
       "name": "streams",
       "description": "Camera stream state and authenticated WebRTC/WHEP signaling"
+    },
+    {
+      "name": "public-stream",
+      "description": "WHEP playback without an API key for enabled cameras. OPTIONS returns 204 capabilities, POST returns 201 SDP with a backend Location, and DELETE returns 204."
     },
     {
       "name": "calibrations",

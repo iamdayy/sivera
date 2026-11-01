@@ -57,13 +57,17 @@ def validate_rtsp_source(source: str, config: Settings = settings) -> None:
         raise MediaMTXError("invalid_rtsp_source", 422)
 
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 def desired_path(source: str) -> dict:
     return {
         "source": source,
-        "sourceOnDemand": True,
-        "sourceOnDemandStartTimeout": "10s",
-        "sourceOnDemandCloseAfter": "10s",
+        "sourceOnDemand": False,
+        "alwaysAvailable": True,
         "rtspTransport": "tcp",
+        "alwaysAvailableTracks": [{"codec": "H264"}]
     }
 
 

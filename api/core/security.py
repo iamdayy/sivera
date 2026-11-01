@@ -87,3 +87,48 @@ def require_scope(required_scope: str):
 def check_camera_access(api_key: ApiKey, camera_id: UUID) -> None:
     if api_key.camera_id is not None and str(api_key.camera_id) != str(camera_id):
         raise HTTPException(status_code=403, detail="API key cannot access this camera")
+
+
+def optional_scope(required_scope: str):
+    """Dependency factory for optional scope check.
+    
+    Returns the ApiKey if valid and has scope, otherwise returns None.
+    Allows public access when no API key is provided or key is invalid.
+    """
+    async def check_scope(
+        api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        db: AsyncSession = Depends(get_db),
+    ) -> Optional[ApiKey]:
+        if not api_key:
+            return None
+        
+        try:
+            # Try to verify the API key
+            # Check against configured keys (for simple deployments)
+            if api_key in settings.valid_api_keys:
+                return ApiKey(
+                    id="configured",
+                    key_hash="",
+                    name="configured",
+                    is_active=True,
+                    scopes=["*"],
+                )
+            
+            # Check database
+            result = await db.execute(
+                select(ApiKey).where(ApiKey.key_hash == hash_key(api_key), ApiKey.is_active == True)
+            )
+            db_key = result.scalar_one_or_none()
+            
+            if not db_key or (db_key.expires_at is not None and db_key.expires_at <= datetime.now(timezone.utc)):
+                return None
+            
+            # Check scope
+            if "*" not in db_key.scopes and required_scope not in db_key.scopes:
+                return None
+            
+            return db_key
+        except Exception:
+            return None
+    
+    return check_scope

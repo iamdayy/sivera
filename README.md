@@ -216,6 +216,17 @@ Playback tidak melakukan transcoding. Capture berkala, snapshot, dan prediksi RT
 
 Tes unit/route: `python -m pytest tests -q`. Tes integrasi opt-in ada di `tests/test_stream_integration.py`: `SIVERA_TEST_DATABASE_URL` harus menunjuk **database kosong disposable**, bukan database aplikasi. MediaMTX juga harus disposable, dengan `SIVERA_TEST_MEDIAMTX_API_PORT`, `SIVERA_TEST_MEDIAMTX_WHEP_PORT`, `SIVERA_TEST_MEDIAMTX_API_PASSWORD`, dan `SIVERA_TEST_MEDIAMTX_READ_PASSWORD`. Opsional `SIVERA_TEST_RTSP_SOURCE` untuk offer/PATCH/DELETE stream sintetis dan `SIVERA_TEST_MEDIAMTX_CONTAINER` untuk tes restart. Tes ini mengubah schema/path dan bisa restart container yang ditentukan; jangan arahkan ke produksi.
 
+#### Pemutaran publik
+
+Halaman dashboard `/public/cameras/{camera_id}` memakai `/api/v1/public/cameras/{camera_id}/stream/whep` tanpa `X-API-Key`. Administrator tetap mengatur dan mengaktifkan stream melalui API kamera berautentikasi.
+
+- OPTIONS WHEP mengembalikan **204** dengan kapabilitas MediaMTX. OPTIONS preflight CORS mengembalikan **200** dari middleware; keduanya berbeda.
+- POST mengirim SDP offer dan menerima **201**, SDP answer, serta `Location` backend untuk PATCH/DELETE. `Location`, `ETag`, `Link`, `Accept-Post`, dan `Accept-Patch` harus terbaca melalui CORS.
+- DELETE mengembalikan **204**, termasuk bila MediaMTX sudah menghapus sesi. URL sesi publik memuat UUID sesi upstream; jangan mencatatnya di log atau mengirimnya ke origin lain. Sesi publik tidak memakai mapping/TTL `StreamSession` milik API berautentikasi.
+- Error frontend “Respons signaling WHEP tidak valid” pada proxy lama disebabkan OPTIONS 200 dan Location upstream yang belum ditulis ulang. Setelah memperbarui backend, restart proses API bila Uvicorn berjalan tanpa reload.
+
+Verifikasi lokal 31 Oktober 2026: Chrome memutar video 1920×1080 melalui API publik, membaca header signaling, dan menutup sesi dengan DELETE 204 saat navigasi dalam aplikasi. Tes route publik/berautentikasi: 47 passed dengan database/MediaMTX mock. Hasil ini belum memverifikasi segmentasi dan volume saat sampah terdeteksi.
+
 ---
 
 ### 5. Capture dan komputasi kalibrasi RTSP (fase 2–3)
@@ -327,7 +338,7 @@ Volume ditampilkan dalam m³ dan L; footprint m², height meter. Metode bernama 
 | `SECRET_KEY` | Secret HMAC identitas sumber/ownership, sama di semua proses | Wajib diganti dan dijaga stabil |
 | `CORS_ORIGINS` | Origin dashboard, comma-separated | Kosong; DEBUG fallback wildcard |
 | `MODELS_DIR` | Direktori weights yang tersedia di worker | `/models` |
-| `DEFAULT_SEG_MODEL` / `DEFAULT_DEPTH_MODEL` | Nama model pada MODELS_DIR | `yolo11s-seg.pt` / `yolo26n-depth.pt` |
+| `DEFAULT_SEG_MODEL` / `DEFAULT_DEPTH_MODEL` | Nama model pada MODELS_DIR | `yolo26n-seg.pt` / `yolo26n-depth.pt` |
 | `CALIB_CAPTURE_MIN_SHARPNESS` | Ambang Laplacian variance area chessboard | `80` |
 | `CALIB_COMPUTE_TIMEOUT_SEC` | Wall-clock komputasi kalibrasi | `300` |
 

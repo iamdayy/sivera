@@ -166,7 +166,7 @@ def test_computation_prepares_same_image_as_prediction_and_bounds_process(monkey
 def test_vision_process_calls_actual_adapter(monkeypatch, tmp_path, capsys):
     import json
     import sys
-    from api.workers import vision_process
+    from api.runtime import vision_process
     image = np.zeros((48, 64, 3), np.uint8)
     filename = tmp_path / "image.png"
     filename.write_bytes(encode_image(image, ".png"))

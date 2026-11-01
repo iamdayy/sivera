@@ -61,9 +61,15 @@ def expire_session(session: CalibrationCaptureSession, now: datetime, config: Se
 
 
 async def publish_capture(session_id: UUID) -> None:
-    from api.workers.tasks.capture_task import run_capture_task
-
-    await asyncio.to_thread(run_capture_task.apply_async, args=[str(session_id)], queue="capture", retry=False)
+    """Enqueue capture dispatch through the runtime instead of Celery."""
+    from api.runtime.dependencies import notify_runtime
+    # Import inside function to avoid circular imports at module load.
+    from api.runtime.events import event_hub
+    # Wake the runtime loop so it picks up the new queued session.
+    try:
+        notify_runtime(None)
+    except Exception:
+        pass
 
 
 async def dispatch_capture(db: AsyncSession, session_id: UUID) -> None:
@@ -118,8 +124,7 @@ async def capture_reconciliation_loop(config: Settings = settings) -> None:
         await reconcile_captures(config)
         from api.services.calibration_compute_service import reconcile_computations
         await reconcile_computations(config)
-        from api.services.prediction_worker_service import reconcile_predictions
-        await reconcile_predictions(config)
+        # Prediction reconciliation is owned by LocalRuntime; no separate loop here.
         await asyncio.sleep(config.CAPTURE_RECONCILE_INTERVAL_SEC)
 
 

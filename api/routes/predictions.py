@@ -27,7 +27,8 @@ from api.schemas.prediction import (
     DetectedInstanceResponse, VolumeEstimateResponse
 )
 from api.services.prediction_orchestrator import submit_prediction_job
-from api.workers.celery_app import celery_app
+from api.runtime.queue import admit_job
+from api.runtime.dependencies import notify_runtime
 from api.services.image_service import decode_prediction_image
 from api.services.prediction_access_service import require_job
 from api.services.snapshot_service import latest_snapshot, require_rtsp_camera
@@ -144,13 +145,9 @@ async def submit_prediction(
         raise HTTPException(status_code=503, detail={"code": "prediction_submission_failed"}) from None
     
     try:
-        await asyncio.to_thread(celery_app.send_task,
-            "api.workers.tasks.predict_task.run_prediction_task",
-            args=[str(job.id)],
-            queue="prediction", retry=False,
-        )
-    except Exception:
-        # If queueing fails, mark job failed and return 503
+        await admit_job(db)
+        await db.commit()
+    except HTTPException:
         await db.execute(update(PredictionJob).where(PredictionJob.id == job.id, PredictionJob.status == "pending").values(
             status="failed", error_msg="prediction_queue_unavailable", completed_at=utcnow(),
         ))
@@ -159,6 +156,10 @@ async def submit_prediction(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Prediction queue unavailable. Please try again later.",
         )
+    try:
+        notify_runtime(None)
+    except Exception:
+        pass
 
     return PredictionJobSubmitResponse(
         job_id=job.id,

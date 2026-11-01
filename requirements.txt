@@ -4,6 +4,8 @@ uvicorn[standard]==0.32.0
 pydantic==2.9.2
 pydantic-settings==2.5.2
 python-multipart==0.0.12
+starlette==0.38.6
+sse-starlette==1.6.5
 
 # Database
 sqlalchemy==2.0.36
@@ -11,10 +13,7 @@ asyncpg==0.29.0
 alembic==1.13.2
 geoalchemy2==0.14.2
 
-# Redis / Celery
-redis==5.2.0
-celery==5.4.0
-flower==2.0.1
+# Redis / Celery removed: FastAPI runtime owns scheduling and durable jobs.
 
 # Storage
 boto3==1.35.40

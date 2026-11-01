@@ -105,14 +105,24 @@ class TestOpenAPI:
 
     def test_public_and_protected_security_matches_dependencies(self):
         schema = TestClient(app).get("/openapi.json").json()
+        public_paths = {
+            "/", "/health", "/openapi.json", "/docs", "/redoc",
+            "/api/v1/public/cameras/{camera_id}/stream/whep",
+            "/api/v1/public/cameras/{camera_id}/stream/whep/{session_id}",
+            "/api/v1/public/cameras/{camera_id}/latest-prediction",
+            "/api/v1/public/cameras/{camera_id}/latest-prediction/outputs/{output_type}/image",
+            "/api/v1/public/cameras/{camera_id}/predictions",
+            "/api/v1/public/cameras/{camera_id}/predictions/stream",
+        }
         for path, operations in schema["paths"].items():
             for operation in operations.values():
                 if not isinstance(operation, dict) or "operationId" not in operation:
                     continue
-                assert operation["security"] == ([] if path in {"/", "/health"} else [{"ApiKeyAuth": []}])
+                is_public = path in public_paths
+                assert operation["security"] == ([] if is_public else [{"ApiKeyAuth": []}])
                 assert not any(parameter.get("in") == "header" and parameter["name"].lower() == "x-api-key"
                                for parameter in operation.get("parameters", []))
-                if path not in {"/", "/health"}:
+                if not is_public:
                     assert {"401", "403"} <= set(operation["responses"])
 
     def test_downloads_are_documented_as_binary_not_json_objects(self):
