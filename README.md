@@ -3,8 +3,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI" />
   <img src="https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL" />
-  <img src="https://img.shields.io/badge/Redis-DC382D?style=for-the-badge&logo=redis&logoColor=white" alt="Redis" />
-  <img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
+    <img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
   <img src="https://img.shields.io/badge/Ultralytics%20YOLO-00FFFF?style=for-the-badge&logo=ultralytics&logoColor=black" alt="YOLO" />
 </p>
 
@@ -64,7 +63,7 @@ SIVERA dirancang untuk mengatasi tantangan estimasi volume objek dan pemodelan r
 - BEV (Bird's Eye View) preview untuk verifikasi
 
 ### 4. **Prediksi Asinkron** (`/cameras/{id}/predict`)
-- Submit job prediksi, antrekan melalui Celery worker (mengembalikan HTTP 202 Accepted)
+- Submit job prediksi, dijadwalkan oleh runtime FastAPI in-process (`api/runtime/`) — mengembalikan HTTP 202 Accepted
 - Polling status job melalui `GET /cameras/{id}/predict/{job_id}`
 - Output: gambar teranotasi, NPZ (data numerik), JSON report
 - Sumber: `upload`, `rtsp_frame` (capture saat worker berjalan), dan `latest_rtsp` (snapshot tersimpan dengan batas usia)
@@ -91,7 +90,7 @@ Path fitur di atas berada di bawah `/api/v1`; ID kamera/job adalah UUID. Lihat `
 | **API Framework** | FastAPI (async) |
 | **Database** | PostgreSQL + PostGIS + SQLAlchemy 2.0 (async) |
 | **Migrations** | Alembic |
-| **Task Queue** | Celery + Redis |
+| **Job runtime** | Runtime FastAPI in-process (`api/runtime/`, `EventHub`) |
 | **Storage** | Local filesystem / S3-compatible (abstraction layer) |
 | **Auth** | API Key based |
 | **Computer Vision** | OpenCV, Ultralytics YOLO, Depth Anything v2 |
@@ -233,13 +232,13 @@ Verifikasi lokal 31 Oktober 2026: Chrome memutar video 1920×1080 melalui API pu
 
 Capture membaca relay asli `sivera_<camera_uuid>` melalui RTSP TCP, bukan WebRTC atau path transcoding. FFmpeg menghasilkan JPEG tanpa resize, crop, undistort, atau autorotation. Dimensi frame pertama menjadi resolusi sesi; perubahan resolusi atau URL sumber menghentikan sesi dengan error. `captured_at` adalah waktu UTC frame diterima worker, **bukan** timestamp sensor kamera.
 
-API, `worker`, `capture-worker`, dan `calibration-worker` memakai volume bernama `artifacts` pada `/app/storage`. Prediction worker membaca queue `prediction` serta `celery` untuk menghabiskan job lama; capture dan calibration worker masing-masing hanya membaca `capture` dan `calibration`, concurrency 1. Image backend memerlukan FFmpeg dan coreutils `timeout`. Jalankan migrasi sampai `007_preview_artifacts` sebelum API/worker baru. Storage yang tidak writable menggagalkan startup, tidak beralih ke root lain. Semua proses wajib memakai `SECRET_KEY` yang sama dan stabil untuk identitas sumber/ownership; rotasi akan menginvalidasi identitas lama.
+API memakai volume bernama `artifacts` pada `/app/storage`. Semua job prediksi, capture, dan kalibrasi dijalankan oleh runtime FastAPI in-process (`api/runtime/`), bukan worker terpisah — `docker-compose.yml` saat ini hanya menjalankan service `postgres`, `api`, dan `mediamtx`. Image backend memerlukan FFmpeg dan coreutils `timeout`. Jalankan migrasi sampai `007_preview_artifacts` sebelum API/worker baru. Storage yang tidak writable menggagalkan startup, tidak beralih ke root lain. Semua proses wajib memakai `SECRET_KEY` yang sama dan stabil untuk identitas sumber/ownership; rotasi akan menginvalidasi identitas lama.
 
 **Sebelum deployment:** artifact lama di writable layer container `/app/storage` tidak otomatis masuk volume baru. Backup/salin data lama ke volume bersama dan verifikasi pemilik UID 1000 sebelum recreate container. Jangan menghapus container lama atau menjalankan `docker compose down -v` sebelum backup. Untuk host API/worker terpisah gunakan storage S3/private atau filesystem yang benar-benar dibagi; volume lokal Docker tidak dibagi antar-host.
 
 ```bash
 python -m alembic -c api/alembic.ini upgrade head
-docker compose up -d --build api worker capture-worker calibration-worker
+docker compose up -d --build
 ```
 
 Perintah ini hanya contoh deployment, bukan dijalankan otomatis. Konfigurasi MediaMTX fase 1 harus sudah tersedia. Enable stream terlebih dahulu; idle diperbolehkan karena sumber on-demand. Request start tidak menunggu kamera menyediakan frame.
@@ -278,7 +277,7 @@ Progress: `attempted`, `captured`, `accepted`, `rejected`, `rejection_counts`, `
 - Heartbeat diperbarui sekitar satu detik selama capture/wait. Default stale 45 detik menghasilkan `capture_worker_lost`; redelivery tidak melanjutkan sesi running lama. Worker token mencegah proses lama menulis setelah sesi ditutup. Operator membuat sesi baru setelah gagal.
 - Compute memakai outbox/token tersendiri, queue timeout yang sama, dan batas wall-clock `CALIB_COMPUTE_TIMEOUT_SEC` (default 300 detik). Penilaian frame dan OpenCV calibration berjalan dalam subprocess yang bisa dihentikan; timeout/task redelivery tidak membuat versi kalibrasi ganda. Perubahan URL sumber menggagalkan capture/compute, termasuk pemeriksaan ulang sebelum commit hasil. Perubahan fisik kamera tanpa perubahan URL tetap tanggung jawab operator.
 - Capture/snapshot mengecek konfigurasi relay sebelum membaca, tanpa menulis path MediaMTX. Source yang belum sinkron menghasilkan error sync-pending; tunggu rekonsiliasi stream sebelum mengulang.
-- Default timeout FFmpeg 15 detik per frame, maksimum 3 kegagalan berturut-turut, frame 10 MiB/16 megapixel (dibatasi sebelum decode dan saat validasi JPEG). Task hard limit 960 detik. Timer `timeout` dari coreutils membatasi FFmpeg bahkan setelah child Celery mati. Stop/deadline membatalkan process group; DB hanya dipegang selama transaksi pendek, tidak selama capture/storage.
+- Default timeout FFmpeg 15 detik per frame, maksimum 3 kegagalan berturut-turut, frame 10 MiB/16 megapixel (dibatasi sebelum decode dan saat validasi JPEG). Task hard limit 960 detik. Timer `timeout` dari coreutils membatasi FFmpeg bahkan setelah proses anak runtime mati. Stop/deadline membatalkan process group; DB hanya dipegang selama transaksi pendek, tidak selama capture/storage.
 - Local writes atomik. Gambar sesi stopped/failed/expired tetap tersedia. Tidak ada retention otomatis: pantau kapasitas disk. Crash persis setelah storage write sebelum DB commit dapat meninggalkan file orphan; camera deletion menghapus metadata lewat cascade, bukan file fisik. Bucket S3 wajib private; lifecycle/cleanup artifact harus dikelola operator.
 
 Tes tambahan: `tests/test_calibration_capture_integration.py` memakai database/MediaMTX disposable, `SIVERA_TEST_MEDIAMTX_RTSP_PORT`, source sintetis, serta FFmpeg di PATH. Tes queue memerlukan `SIVERA_TEST_CELERY_BROKER_URL`, `SIVERA_TEST_STORAGE_ROOT`, dan capture-worker yang menunjuk layanan/storage yang sama. `SIVERA_TEST_CAPTURE_CRASH=true` mengizinkan SIGKILL pada child capture-worker disposable di host pengujian; jangan aktifkan untuk worker pengguna/produksi.
@@ -295,7 +294,7 @@ Tes tambahan: `tests/test_calibration_capture_integration.py` memakai database/M
 | `GET /predict/{job_id}/outputs` | `predict:read` | Output terdaftar sesuai `return_outputs` |
 | `GET /predict/{job_id}/outputs/{output_type}` | `predict:read` | Unduh output terdaftar |
 
-`POST /snapshots` menunggu satu capture/storage write, bukan job Celery. Stream harus enabled; snapshot adalah frame asli tanpa transformasi. Frame sesi kalibrasi tidak otomatis masuk tabel snapshot. Latest memerlukan sumber yang sama dan usia default 30 detik (1..300); tidak ada rekaman historis. URL/credential sumber dan storage key snapshot tidak masuk respons.
+`POST /snapshots` menunggu satu capture/storage write, bukan job antrean. Stream harus enabled; snapshot adalah frame asli tanpa transformasi. Frame sesi kalibrasi tidak otomatis masuk tabel snapshot. Latest memerlukan sumber yang sama dan usia default 30 detik (1..300); tidak ada rekaman historis. URL/credential sumber dan storage key snapshot tidak masuk respons.
 
 - `upload`: wajib `file`; timestamp caller opsional. Dengan kalibrasi baru yang punya K asli/resolusi, kirim gambar **raw** pada dimensi kalibrasi; pipeline melakukan undistort sekali. Kalibrasi legacy tanpa K asli tetap menerima kontrak gambar **already-undistorted** pada dimensi kamera terdaftar.
 - `rtsp_frame`: frame baru diambil **saat worker mengeksekusi**, bukan saat submit. Snapshot hasil capture dipersistenkan.
@@ -319,7 +318,7 @@ curl -X POST "http://localhost:8000/api/v1/cameras/$CAMERA_ID/predict" \
 
 `return_outputs` adalah array JSON pada form: omitted = semua 13 output, `[]` = tidak ada output terdaftar. Jenis valid: `mask`, `overlay`, `instances_json`, `depth_raw_vis`, `depth_scaled_vis`, `depth_masked`, `height_map`, `lifted_points_npz`, `volume_heatmap`, `volume_result_npz`, `bev_image`, `bev_mask_proyeksi`, `bev_overlay`. Nilai tidak dikenal mendapat 422. Pilihan ini dipersistenkan dan membatasi download, termasuk `/files`; artifact internal masih dapat dibuat. Summary/instances/volumes tidak difilter. Grid memakai `volume_cell_m` (default 0.05 m) dan `volume_min_pts_per_cell` (default 2); alokasi maksimum 1,000,000 cell.
 
-Job dipersistenkan sebelum dispatch: `pending -> processing -> done/failed`. Broker gagal mendapat 503 dan job failed; prediksi tidak memakai outbox redispatch seperti capture/compute. Reconciler menandai pending gagal setelah queue timeout dan processing setelah hard limit Celery + 60 detik. Duplicate task tidak diproses ulang; completion lama tidak bisa menimpa timeout. Submit ulang setelah kegagalan. Perubahan sumber saat antrean/capture/inferensi menghasilkan error aman dan tidak mempublikasikan output.
+Job dipersistenkan sebelum dispatch: `pending -> processing -> done/failed`. Prediksi tidak memakai outbox redispatch seperti capture/compute. Reconciler menandai pending gagal setelah queue timeout (`CAPTURE_QUEUE_TIMEOUT_SEC`) dan processing gagal setelah timeout prediksi (`PREDICTION_TIMEOUT_SEC`). Duplicate task tidak diproses ulang; completion lama tidak bisa menimpa timeout. Submit ulang setelah kegagalan. Perubahan sumber saat antrean/capture/inferensi menghasilkan error aman dan tidak mempublikasikan output.
 
 Volume ditampilkan dalam m³ dan L; footprint m², height meter. Metode bernama `convex_hull` saat ini adalah **area hull footprint 2D × median height**, bukan hull 3D. Grid tidak sama dengan hull; BEV bukan rekonstruksi 3D penuh. Estimasi yang tidak tersedia tetap null/tidak punya row volume, NPZ menggunakan NaN, bukan nol.
 
@@ -330,7 +329,6 @@ Volume ditampilkan dalam m³ dan L; footprint m², height meter. Metode bernama 
 | Variabel | Deskripsi | Default |
 |----------|-----------|---------|
 | `DATABASE_URL` | PostgreSQL connection string | `postgresql+asyncpg://waste:waste@localhost:5432/waste_db` |
-| `CELERY_BROKER_URL` | Redis broker Celery | `redis://localhost:6379/0` |
 | `STORAGE_BACKEND` | `local` atau `s3` | `local` |
 | `STORAGE_LOCAL_ROOT` | Root writable bersama API/worker | `/data/waste-api`, Compose `/app/storage` |
 | `STORAGE_S3_ENDPOINT_URL` / `STORAGE_S3_BUCKET` | S3-compatible endpoint/bucket private | Tidak dikonfigurasi |
@@ -354,7 +352,7 @@ Endpoint kamera/artifact memerlukan header (root, health, dan dokumentasi tetap 
 X-API-Key: <API_KEY>
 ```
 
-Header hilang saat ini mendapat 422, key tidak valid/tidak aktif/kedaluwarsa 401, dan scope atau akses kamera ditolak 403. Key database ditolak saat `expires_at <= now` dalam UTC; key konfigurasi tidak memiliki expiry database. Error `detail` dapat berupa string, objek `{code: ...}`, atau daftar validasi. `/health` selalu mengembalikan 200 jika probe selesai; baca `status` dan `database` untuk membedakan healthy dari degraded. Endpoint ini tidak memeriksa Redis, worker, MediaMTX, atau validitas key.
+Header hilang saat ini mendapat 422, key tidak valid/tidak aktif/kedaluwarsa 401, dan scope atau akses kamera ditolak 403. Key database ditolak saat `expires_at <= now` dalam UTC; key konfigurasi tidak memiliki expiry database. Error `detail` dapat berupa string, objek `{code: ...}`, atau daftar validasi. `/health` selalu mengembalikan 200 jika probe selesai; baca `status` dan `database` untuk membedakan healthy dari degraded. Endpoint ini tidak memeriksa runtime job, MediaMTX, atau validitas key.
 
 ### Kontrak OpenAPI
 
@@ -467,9 +465,10 @@ sivera/
 │   │   ├── segment_service.py
 │   │   ├── volume_service.py
 │   │   └── prediction_orchestrator.py
-│   ├── workers/                  # Celery async tasks
-│   │   ├── celery_app.py
-│   │   └── tasks/predict_task.py
+│   ├── runtime/                  # In-process job runtime (pengganti Celery/Redis)
+│   │   ├── events.py             # EventHub (pub/sub in-process)
+│   │   ├── manager.py            # Manajemen job
+│   │   └── dependencies.py
 │   ├── scripts/                  # Utility scripts
 │   └── alembic/                  # Database migrations
 ├── docker-compose.yml            # Multi-container orchestration
@@ -528,7 +527,6 @@ Proyek ini dilisensikan di bawah **MIT License** - lihat file [LICENSE](LICENSE)
 - [OpenCV](https://opencv.org/) - Computer vision library
 - [FastAPI](https://fastapi.tiangolo.com/) - Modern web framework
 - [SQLAlchemy](https://www.sqlalchemy.org/) - Database toolkit
-- [Celery](https://docs.celeryq.dev/) - Distributed task queue
 
 ---
 
