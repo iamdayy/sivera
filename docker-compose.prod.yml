@@ -2,18 +2,22 @@
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 # Requires in environment or .env: SECRET_KEY (>=32 chars, unique), POSTGRES_PASSWORD,
 # VALID_API_KEYS, MEDIAMTX_API_PASSWORD, MEDIAMTX_READ_PASSWORD, CORS_ORIGINS.
+# Requires Docker Compose >= 2.24.0: the !override tag below REPLACES the base
+# service `ports` lists instead of merging them (verified with Compose v5.6.1).
+# Without !override, base ports (postgres 5432, api 8000 on all interfaces) are
+# merged in and stay exposed even in production.
 version: "3.8"
 
 services:
   postgres:
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}
-    ports: [] # do not expose Postgres publicly in production
+    ports: !override [] # do not expose Postgres on any host interface in production
 
   api:
     environment:
       - DEBUG=false
       - DATABASE_URL=postgresql+asyncpg://waste:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}@postgres/waste_db
       - CORS_ORIGINS=${CORS_ORIGINS:?Set explicit CORS_ORIGINS for production}
-    ports:
-      - "127.0.0.1:8000:8000" # publish behind a reverse proxy, not on all interfaces
+    ports: !override
+      - "127.0.0.1:8000:8000" # publish behind a reverse proxy only, not on all interfaces
