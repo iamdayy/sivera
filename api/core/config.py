@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # Security
     API_KEY_HEADER: str = "X-API-Key"
     VALID_API_KEYS: str = ""
-    SECRET_KEY: str = "change-me-in-production"
+    SECRET_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 1 week
     CORS_ORIGINS: str = ""  # comma-separated origins; empty = secure default (see main.py)
     
