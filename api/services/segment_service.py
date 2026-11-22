@@ -66,6 +66,7 @@ def predict_instances(
         raise ValueError("prediction_invalid_segmentation")
     
     r = model.predict(source=image_bgr, device=device, imgsz=imgsz, conf=conf, iou=iou, verbose=False)[0]
+    print(f"Segmentation prediction: {len(r.boxes.cls) if r.boxes is not None else 0} instances")
     
     out = []
     if r.masks is not None:

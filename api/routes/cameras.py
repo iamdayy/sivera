@@ -101,8 +101,7 @@ async def list_cameras(
     result = await db.execute(query)
     cameras = result.scalars().all()
     items = [CameraResponse.from_orm_with_geo(c) for c in cameras]
-    print("RTPS from items:", [item.rtsp_url for item in items])
-    
+
     return CameraListResponse(
         items=items,
         total=total,

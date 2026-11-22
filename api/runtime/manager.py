@@ -22,8 +22,9 @@ from api.services.prediction_runner_service import PredictionRunner
 
 
 class EventHub:
-    def __init__(self, max_clients: int) -> None:
+    def __init__(self, max_clients: int, max_event_bytes: int = 1048576) -> None:
         self.max_clients = max_clients
+        self.max_event_bytes = max_event_bytes
         self.subscribers: dict[UUID, set[asyncio.Queue]] = {}
         self.closed = False
 
@@ -57,8 +58,19 @@ class EventHub:
         if self.closed or camera_id not in self.subscribers:
             return
         payload = await asyncio.to_thread(json.dumps, event, allow_nan=False, separators=(",", ":"))
+        if len(payload.encode("utf-8")) > self.max_event_bytes:
+            payload = await asyncio.to_thread(json.dumps, self._trim_oversized(event), allow_nan=False, separators=(",", ":"))
         for queue in tuple(self.subscribers.get(camera_id, ())):
             self.offer(queue, payload)
+
+    def _trim_oversized(self, event: dict) -> dict:
+        """Drop base64 media from oversized events instead of sending unbounded payloads."""
+        trimmed = {key: value for key, value in event.items() if not key.endswith("_base64")}
+        segmentation = event.get("segmentation")
+        if isinstance(segmentation, dict):
+            trimmed["segmentation"] = {key: value for key, value in segmentation.items() if not key.endswith("_base64")}
+        trimmed["payload_truncated"] = True
+        return trimmed
 
     def close(self) -> None:
         self.closed = True

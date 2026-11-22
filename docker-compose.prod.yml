@@ -1,0 +1,19 @@
+# Production overrides. Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Requires in environment or .env: SECRET_KEY (>=32 chars, unique), POSTGRES_PASSWORD,
+# VALID_API_KEYS, MEDIAMTX_API_PASSWORD, MEDIAMTX_READ_PASSWORD, CORS_ORIGINS.
+version: "3.8"
+
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}
+    ports: [] # do not expose Postgres publicly in production
+
+  api:
+    environment:
+      - DEBUG=false
+      - DATABASE_URL=postgresql+asyncpg://waste:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}@postgres/waste_db
+      - CORS_ORIGINS=${CORS_ORIGINS:?Set explicit CORS_ORIGINS for production}
+    ports:
+      - "127.0.0.1:8000:8000" # publish behind a reverse proxy, not on all interfaces

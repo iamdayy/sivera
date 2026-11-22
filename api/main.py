@@ -5,13 +5,15 @@ import asyncio
 from contextlib import suppress
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Path as FastAPIPath
+from fastapi import Depends, FastAPI, HTTPException, Path as FastAPIPath, Request
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.openapi.utils import get_openapi
 from sqlalchemy import text
 
 from api.core.config import settings, STORAGE_ROOT
+from api.core.rate_limit import SlidingWindowRateLimiter
 from api.core.database import AsyncSession, get_db, get_db_context, init_db, close_db, engine
 from api.core.security import verify_api_key
 from api.core.storage import get_storage
@@ -36,6 +38,11 @@ logging.basicConfig(
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup
+    if not settings.DEBUG and settings.secret_key_is_weak:
+        raise RuntimeError(
+            "Refusing to start with a default or weak SECRET_KEY while DEBUG=false. "
+            "Set a strong unique SECRET_KEY (>=32 chars) in the environment."
+        )
     await init_db()
     if settings.STORAGE_BACKEND.lower() == "local":
         # Fail startup rather than let API and workers silently use different roots.
@@ -45,6 +52,7 @@ async def lifespan(app: FastAPI):
 
     storage: StorageBackend = get_storage()
     event_hub.max_clients = settings.SSE_MAX_CLIENTS
+    event_hub.max_event_bytes = settings.SSE_MAX_EVENT_BYTES
     runtime = LocalRuntime(engine, get_db_context, storage, event_hub, settings)
     app.state.runtime = runtime
     await runtime.start()
@@ -203,6 +211,18 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Location", "ETag", "Link", "Accept-Post", "Accept-Patch"],
 )
+
+# Rate limit unauthenticated public endpoints (WHEP signaling, prediction SSE/reads).
+_public_rate_limiter = SlidingWindowRateLimiter(settings.PUBLIC_RATE_LIMIT_PER_MINUTE)
+
+async def public_rate_limit_dispatch(request: Request, call_next):
+    if request.url.path.startswith("/api/v1/public/"):
+        client = request.client.host if request.client else "unknown"
+        if not _public_rate_limiter.allow(f"{client}:{request.url.path}"):
+            return JSONResponse(status_code=429, content={"detail": {"code": "rate_limited"}})
+    return await call_next(request)
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=public_rate_limit_dispatch)
 
 # Artefact file serving (authenticated)
 # Replaces the unauthenticated StaticFiles mount at /files.

@@ -5,6 +5,15 @@ from typing import List, Optional
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Known insecure placeholder values that must never run outside DEBUG mode.
+_WEAK_SECRET_KEYS = frozenset({
+    "",
+    "change-me-in-production",
+    "change-me-in-production-min-32-chars",
+    "secret",
+    "test-secret",
+})
+
 
 class Settings(BaseSettings):
     # Application
@@ -40,6 +49,8 @@ class Settings(BaseSettings):
     VISION_MAX_MESSAGE_BYTES: int = Field(134217728, ge=1048576, le=536870912)
     VISION_CPU_THREADS: int = Field(1, ge=1, le=8)
     SSE_MAX_CLIENTS: int = Field(100, ge=1, le=1000)
+    SSE_MAX_EVENT_BYTES: int = Field(1048576, ge=65536, le=16777216)
+    PUBLIC_RATE_LIMIT_PER_MINUTE: int = Field(120, ge=1, le=100000)
     
     # Upload limits
     MAX_UPLOAD_SIZE_MB: int = 10  # maximum upload size in megabytes
@@ -134,6 +145,11 @@ class Settings(BaseSettings):
         enable_decoding=False,
         extra="ignore",
     )
+
+    @property
+    def secret_key_is_weak(self) -> bool:
+        """True when SECRET_KEY is a known placeholder or too short to be safe."""
+        return self.SECRET_KEY in _WEAK_SECRET_KEYS or len(self.SECRET_KEY) < 32
 
     @property
     def valid_api_keys(self) -> List[str]:
