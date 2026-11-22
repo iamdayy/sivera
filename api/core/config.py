@@ -151,6 +151,18 @@ class Settings(BaseSettings):
         """True when SECRET_KEY is a known placeholder or too short to be safe."""
         return self.SECRET_KEY in _WEAK_SECRET_KEYS or len(self.SECRET_KEY) < 32
 
+    def enforce_secret_key_for_production(self) -> None:
+        """Refuse startup outside development mode with an empty/default/placeholder SECRET_KEY.
+
+        Raises RuntimeError when DEBUG is false and the key is weak. The error
+        message names the offending variable but never includes its value.
+        """
+        if not self.DEBUG and self.secret_key_is_weak:
+            raise RuntimeError(
+                "Refusing to start with a default or weak SECRET_KEY while DEBUG=false. "
+                "Set a strong unique SECRET_KEY (>=32 chars) in the environment."
+            )
+
     @property
     def valid_api_keys(self) -> List[str]:
         """Return configured API keys from comma-separated or JSON-list input."""

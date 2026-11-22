@@ -38,11 +38,7 @@ logging.basicConfig(
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup
-    if not settings.DEBUG and settings.secret_key_is_weak:
-        raise RuntimeError(
-            "Refusing to start with a default or weak SECRET_KEY while DEBUG=false. "
-            "Set a strong unique SECRET_KEY (>=32 chars) in the environment."
-        )
+    settings.enforce_secret_key_for_production()
     await init_db()
     if settings.STORAGE_BACKEND.lower() == "local":
         # Fail startup rather than let API and workers silently use different roots.
